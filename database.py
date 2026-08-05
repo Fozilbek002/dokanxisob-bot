@@ -48,7 +48,8 @@ async def init_db():
 # ==== MAHSULOTLAR (KIRIM) ====
 
 async def add_or_update_product(owner_id: int, name: str, purchase_price: float, quantity: float):
-    """Mahsulot kiritish: mavjud bo'lsa qoldiqni oshiradi va tannarxni yangilaydi, yo'q bo'lsa yaratadi."""
+    """Mahsulot kiritish: mavjud bo'lsa qoldiqni oshiradi va tannarxni yangilaydi, yo'q bo'lsa yaratadi.
+    Eslatma: kirim sanasi alohida qayd etilmaydi, chunki ombor - joriy qoldiq holati."""
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
             "SELECT id, quantity FROM products WHERE owner_id = ? AND name = ?",
@@ -111,17 +112,27 @@ async def decrease_stock(product_id: int, quantity: float):
 # ==== SOTUVLAR ====
 
 async def record_sale(owner_id: int, product_name: str, quantity: float,
-                       sale_price: float, purchase_price: float):
+                       sale_price: float, purchase_price: float, sale_date: str = None):
+    """sale_date: 'YYYY-MM-DD' formatida (ixtiyoriy). Berilmasa, hozirgi sana ishlatiladi."""
     revenue = sale_price * quantity
     cost = purchase_price * quantity
     profit = revenue - cost
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            """INSERT INTO sales
-               (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit),
-        )
+        if sale_date:
+            await db.execute(
+                """INSERT INTO sales
+                   (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit,
+                 f"{sale_date} 12:00:00"),
+            )
+        else:
+            await db.execute(
+                """INSERT INTO sales
+                   (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit),
+            )
         await db.commit()
     return revenue, cost, profit
 
@@ -139,12 +150,19 @@ async def get_sales(owner_id: int, limit: int = 15):
 
 # ==== CHIQIMLAR ====
 
-async def add_expense(owner_id: int, name: str, amount: float):
+async def add_expense(owner_id: int, name: str, amount: float, expense_date: str = None):
+    """expense_date: 'YYYY-MM-DD' formatida (ixtiyoriy). Berilmasa, hozirgi sana ishlatiladi."""
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "INSERT INTO expenses (owner_id, name, amount) VALUES (?, ?, ?)",
-            (owner_id, name, amount),
-        )
+        if expense_date:
+            await db.execute(
+                "INSERT INTO expenses (owner_id, name, amount, created_at) VALUES (?, ?, ?, ?)",
+                (owner_id, name, amount, f"{expense_date} 12:00:00"),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO expenses (owner_id, name, amount) VALUES (?, ?, ?)",
+                (owner_id, name, amount),
+            )
         await db.commit()
 
 

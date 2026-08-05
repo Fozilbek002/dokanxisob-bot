@@ -56,6 +56,13 @@ period_menu = InlineKeyboardMarkup(
     ]
 )
 
+date_choice_menu = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📆 Bugun", callback_data="date_today")],
+        [InlineKeyboardButton(text="🗓 Boshqa sana kiritish", callback_data="date_custom")],
+    ]
+)
+
 cancel_menu = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
     resize_keyboard=True,
@@ -72,11 +79,13 @@ class AddProduct(StatesGroup):
 class SellProduct(StatesGroup):
     quantity = State()
     price = State()
+    date = State()
 
 
 class AddExpense(StatesGroup):
     name = State()
     amount = State()
+    date = State()
 
 
 class CustomPeriod(StatesGroup):
@@ -266,12 +275,22 @@ async def sell_price(message: Message, state: FSMContext):
         await message.answer("Iltimos, narxni to'g'ri kiriting. Masalan: 5000")
         return
 
+    await state.update_data(sell_price=price)
+    await state.set_state(SellProduct.date)
+    await message.answer(
+        "Bu sotuv qaysi sanaga tegishli?",
+        reply_markup=date_choice_menu,
+    )
+
+
+async def finalize_sale(target_message: Message, owner_id: int, state: FSMContext, sale_date: str = None):
     data = await state.get_data()
     product = data["product"]
     qty = data["quantity"]
+    price = data["sell_price"]
 
     revenue, cost, profit = await db.record_sale(
-        message.from_user.id, product["name"], qty, price, product["purchase_price"]
+        owner_id, product["name"], qty, price, product["purchase_price"], sale_date
     )
     await db.decrease_stock(product["id"], qty)
     await db.set_sale_price(product["id"], price)
@@ -281,9 +300,12 @@ async def sell_price(message: Message, state: FSMContext):
     else:
         result_line = f"🔴 Zarar: <b>{fmt(abs(profit))} so'm</b>"
 
+    date_line = f"Sana: {sale_date}\n" if sale_date else ""
+
     await state.clear()
-    await message.answer(
+    await target_message.answer(
         f"🧾 <b>Sotuv qayd etildi:</b>\n\n"
+        f"{date_line}"
         f"{product['name']} — {fmt(qty)} dona x {fmt(price)} so'm\n"
         f"Tushum: {fmt(revenue)} so'm\n"
         f"Tannarx: {fmt(cost)} so'm\n"
@@ -291,6 +313,34 @@ async def sell_price(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=main_menu,
     )
+
+
+@router.callback_query(SellProduct.date, F.data == "date_today")
+async def sell_date_today(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete_reply_markup()
+    await finalize_sale(callback.message, callback.from_user.id, state, None)
+    await callback.answer()
+
+
+@router.callback_query(SellProduct.date, F.data == "date_custom")
+async def sell_date_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete_reply_markup()
+    await callback.message.answer(
+        "Sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
+        reply_markup=cancel_menu,
+    )
+    await callback.answer()
+
+
+@router.message(SellProduct.date)
+async def sell_date_text(message: Message, state: FSMContext):
+    parsed = parse_date(message.text)
+    if not parsed:
+        await message.answer(
+            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.06.2026"
+        )
+        return
+    await finalize_sale(message, message.from_user.id, state, parsed.isoformat())
 
 
 # ==== CHIQIM QO'SHISH ====
@@ -317,15 +367,56 @@ async def add_expense_amount(message: Message, state: FSMContext):
         await message.answer("Iltimos, summani to'g'ri kiriting. Masalan: 50000")
         return
 
+    await state.update_data(amount=amount)
+    await state.set_state(AddExpense.date)
+    await message.answer(
+        "Bu chiqim qaysi sanaga tegishli?",
+        reply_markup=date_choice_menu,
+    )
+
+
+async def finalize_expense(target_message: Message, owner_id: int, state: FSMContext, expense_date: str = None):
     data = await state.get_data()
     name = data["name"]
-    await db.add_expense(message.from_user.id, name, amount)
+    amount = data["amount"]
+    await db.add_expense(owner_id, name, amount, expense_date)
+
+    date_line = f"Sana: {expense_date}\n" if expense_date else ""
+
     await state.clear()
-    await message.answer(
-        f"✅ Chiqim qo'shildi:\n<b>{name}</b> — {fmt(amount)} so'm",
+    await target_message.answer(
+        f"✅ Chiqim qo'shildi:\n{date_line}<b>{name}</b> — {fmt(amount)} so'm",
         parse_mode="HTML",
         reply_markup=main_menu,
     )
+
+
+@router.callback_query(AddExpense.date, F.data == "date_today")
+async def expense_date_today(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete_reply_markup()
+    await finalize_expense(callback.message, callback.from_user.id, state, None)
+    await callback.answer()
+
+
+@router.callback_query(AddExpense.date, F.data == "date_custom")
+async def expense_date_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete_reply_markup()
+    await callback.message.answer(
+        "Sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
+        reply_markup=cancel_menu,
+    )
+    await callback.answer()
+
+
+@router.message(AddExpense.date)
+async def expense_date_text(message: Message, state: FSMContext):
+    parsed = parse_date(message.text)
+    if not parsed:
+        await message.answer(
+            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.06.2026"
+        )
+        return
+    await finalize_expense(message, message.from_user.id, state, parsed.isoformat())
 
 
 # ==== SOTUVLAR TARIXI ====
