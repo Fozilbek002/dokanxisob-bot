@@ -18,7 +18,7 @@ from aiogram.types import (
 import database as db
 
 # ==== SOZLAMALAR ====
-BOT_TOKEN = "SIZNING_BOT_TOKENINGIZ"  # @BotFather dan olingan tokenni shu yerga qo'ying
+BOT_TOKEN = "8612572282:AAGbr5bw9u7hIAw9DOTegr6aTTvWRJ8t0WA"
 
 logging.basicConfig(level=logging.INFO)
 
