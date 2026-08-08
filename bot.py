@@ -1,560 +1,561 @@
-import asyncio
-import logging
-from datetime import date, timedelta
+"""
+Do'kon hisob-kitob Telegram boti
+=================================
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
+Imkoniyatlar:
+    📦 Ombor           — mahsulot kiritish (nomi, tannarxi, miqdori)
+    💰 Sotish          — mahsulot sotish, ombordan avtomatik ayirish
+    💸 Chiqim          — xarajatlarni yozib borish
+    💵 Kassa           — kassa ochish / yopish
+    📊 Hisobot         — kunlik / haftalik / oylik / yillik / sana bo'yicha
+    📄 PDF             — hisobotni PDF shaklida yuklab olish
+    📊 Excel           — hisobotni Excel shaklida yuklab olish
+    📈 Grafiklar       — kunlik foyda/zarar diagrammasi
+    🤖 AI tahlili      — Anthropic API orqali matnli tahlil (ixtiyoriy)
+    🌐 Til             — O'zbek(lotin/kirill) / Rus / Ingliz
+
+O'rnatish:
+    pip install python-telegram-bot --upgrade openpyxl reportlab matplotlib requests
+
+Ishga tushirish:
+    python bot.py
+
+Eslatma:
+    1. @BotFather orqali token oling va BOT_TOKEN ga qo'ying.
+    2. AI tahlili ishlashi uchun ANTHROPIC_API_KEY ni muhit o'zgaruvchisiga qo'ying (ixtiyoriy).
+"""
+
+import os
+import re
+import logging
+from datetime import datetime, timedelta
+
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
 )
 
 import database as db
-
-# ==== SOZLAMALAR ====
-BOT_TOKEN = "8612572282:AAGbr5bw9u7hIAw9DOTegr6aTTvWRJ8t0WA"
-
-logging.basicConfig(level=logging.INFO)
-
-router = Router()
-
-
-def fmt(n):
-    """Sonni 15 000 kabi formatlab beradi."""
-    return f"{n:,.0f}".replace(",", " ")
-
-
-# ==== ASOSIY MENYU ====
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📥 Mahsulot kiritish"), KeyboardButton(text="💰 Sotish")],
-        [KeyboardButton(text="💸 Chiqim qo'shish"), KeyboardButton(text="📦 Ombor")],
-        [KeyboardButton(text="📜 Sotuvlar tarixi"), KeyboardButton(text="📊 Statistika")],
-    ],
-    resize_keyboard=True,
+from language import t
+from keyboards import (
+    main_menu_keyboard,
+    cancel_keyboard,
+    items_inline_keyboard,
+    report_period_keyboard,
+    language_keyboard,
 )
+from reports import generate_excel, generate_pdf, generate_chart
 
-period_menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📆 Bugun", callback_data="period_today"),
-            InlineKeyboardButton(text="🗓 Bu hafta", callback_data="period_week"),
-        ],
-        [
-            InlineKeyboardButton(text="📅 Bu oy", callback_data="period_month"),
-            InlineKeyboardButton(text="📅 Bu yil", callback_data="period_year"),
-        ],
-        [InlineKeyboardButton(text="🔎 Sana oralig'ini kiritish", callback_data="period_custom")],
-        [InlineKeyboardButton(text="♾ Hammasi (boshidan)", callback_data="period_all")],
-    ]
-)
+# ---- SOZLAMALAR ----
+BOT_TOKEN = "8903276242:AAGnblSuc9Id8A5RgaG1PiGBLxSIUWdgTxw"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-date_choice_menu = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text="📆 Bugun", callback_data="date_today")],
-        [InlineKeyboardButton(text="🗓 Boshqa sana kiritish", callback_data="date_custom")],
-    ]
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-cancel_menu = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
-    resize_keyboard=True,
-)
+# ---- CONVERSATION STATES ----
+(
+    OMBOR_NAME, OMBOR_PRICE, OMBOR_QTY,
+    SALE_QTY, SALE_PRICE,
+    EXPENSE_DESC, EXPENSE_AMOUNT,
+    CASH_OPEN_AMOUNT, CASH_CLOSE_AMOUNT,
+    REPORT_CUSTOM_DATE,
+) = range(10)
 
 
-# ==== HOLATLAR (FSM) ====
-class AddProduct(StatesGroup):
-    name = State()
-    quantity = State()
-    price = State()
+def get_lang(context):
+    return context.user_data.get("lang", "uz_latin")
 
 
-class SellProduct(StatesGroup):
-    quantity = State()
-    price = State()
-    date = State()
+def is_cancel(text, lang):
+    return text == t("cancel", lang)
 
 
-class AddExpense(StatesGroup):
-    name = State()
-    amount = State()
-    date = State()
+# ---------------- START ----------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(
+        t("welcome", lang, name=update.effective_user.first_name),
+        reply_markup=main_menu_keyboard(lang),
+    )
 
 
-class CustomPeriod(StatesGroup):
-    date_from = State()
-    date_to = State()
+# ---------------- OMBOR ----------------
+
+async def ombor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(t("ombor_name", lang), reply_markup=cancel_keyboard(lang))
+    return OMBOR_NAME
 
 
-def parse_date(text: str):
-    """KK.OO.YYYY formatidagi sanani date obyektiga aylantiradi."""
-    text = text.strip()
-    for sep in [".", "/", "-"]:
-        parts = text.split(sep)
-        if len(parts) == 3:
-            try:
-                day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
-                return date(year, month, day)
-            except (ValueError, IndexError):
-                continue
-    return None
+async def ombor_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    context.user_data["new_item_name"] = update.message.text.strip()
+    await update.message.reply_text(t("ombor_price", lang))
+    return OMBOR_PRICE
 
 
-def parse_number(text: str):
-    """'1000', '1 000', '1000.5' kabi kiritilgan matnni songa aylantiradi."""
-    cleaned = text.strip().replace(" ", "").replace(",", "")
+async def ombor_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
     try:
-        return float(cleaned)
+        price = float(update.message.text.replace(",", "."))
     except ValueError:
-        return None
+        await update.message.reply_text(t("invalid_number", lang))
+        return OMBOR_PRICE
+    context.user_data["new_item_price"] = price
+    await update.message.reply_text(t("ombor_qty", lang))
+    return OMBOR_QTY
 
 
-# ==== /start ====
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "Assalomu alaykum! 👋\n\n"
-        "Bu bot orqali:\n"
-        "• Mahsulot kirimini (necha pulga olganingizni) yozasiz\n"
-        "• Sotganingizni qayd qilasiz\n"
-        "• Bot avtomatik <b>foyda yoki zararni</b> hisoblab beradi\n\n"
-        "Quyidagi menyudan tanlang 👇",
-        parse_mode="HTML",
-        reply_markup=main_menu,
+async def ombor_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        qty = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return OMBOR_QTY
+
+    name = context.user_data["new_item_name"]
+    price = context.user_data["new_item_price"]
+    db.add_item(name, price, qty)
+
+    await update.message.reply_text(
+        t("ombor_added", lang, name=name, qty=qty, price=price),
+        reply_markup=main_menu_keyboard(lang),
     )
+    return ConversationHandler.END
 
 
-@router.message(F.text == "❌ Bekor qilish")
-async def cancel_action(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Bekor qilindi.", reply_markup=main_menu)
+# ---------------- SOTISH ----------------
+
+async def sale_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    items = db.get_items()
+    if not items:
+        await update.message.reply_text(t("sale_no_items", lang), reply_markup=main_menu_keyboard(lang))
+        return ConversationHandler.END
+    await update.message.reply_text(t("sale_choose_item", lang), reply_markup=items_inline_keyboard(items))
+    return ConversationHandler.END  # tanlov inline callback orqali davom etadi
 
 
-# ==== MAHSULOT KIRITISH (KIRIM) ====
-@router.message(F.text == "📥 Mahsulot kiritish")
-async def add_product_start(message: Message, state: FSMContext):
-    await state.set_state(AddProduct.name)
-    await message.answer(
-        "Mahsulot nomini kiriting (masalan: Ruchka):",
-        reply_markup=cancel_menu,
+async def sale_item_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    query = update.callback_query
+    await query.answer()
+    item_id = int(query.data.split("_")[1])
+    item = db.get_item(item_id)
+    context.user_data["sale_item"] = dict(item)
+    await query.message.reply_text(
+        t("sale_qty", lang, stock=item["quantity"]),
+        reply_markup=cancel_keyboard(lang),
     )
+    return SALE_QTY
 
 
-@router.message(AddProduct.name)
-async def add_product_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text.strip())
-    await state.set_state(AddProduct.quantity)
-    await message.answer("Nechta dona oldingiz?")
+async def sale_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        qty = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return SALE_QTY
+
+    item = context.user_data["sale_item"]
+    if qty > item["quantity"]:
+        await update.message.reply_text(t("sale_not_enough", lang, stock=item["quantity"]))
+        return SALE_QTY
+
+    context.user_data["sale_qty"] = qty
+    await update.message.reply_text(t("sale_price", lang))
+    return SALE_PRICE
 
 
-@router.message(AddProduct.quantity)
-async def add_product_quantity(message: Message, state: FSMContext):
-    qty = parse_number(message.text)
-    if qty is None or qty <= 0:
-        await message.answer("Iltimos, musbat son kiriting. Masalan: 10")
-        return
-    await state.update_data(quantity=qty)
-    await state.set_state(AddProduct.price)
-    await message.answer("Har birini necha so'mdan oldingiz? (tannarx)")
+async def sale_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        price = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return SALE_PRICE
 
+    item = context.user_data["sale_item"]
+    qty = context.user_data["sale_qty"]
 
-@router.message(AddProduct.price)
-async def add_product_price(message: Message, state: FSMContext):
-    price = parse_number(message.text)
-    if price is None or price <= 0:
-        await message.answer("Iltimos, narxni to'g'ri kiriting. Masalan: 1000")
-        return
+    db.add_sale(item["id"], item["name"], qty, price, item["purchase_price"])
+    db.update_stock(item["id"], item["quantity"] - qty)
 
-    data = await state.get_data()
-    name = data["name"]
-    qty = data["quantity"]
-    total = price * qty
+    total = qty * price
+    profit = total - (qty * item["purchase_price"])
 
-    await db.add_or_update_product(message.from_user.id, name, price, qty)
-    await state.clear()
-    await message.answer(
-        f"✅ Kirim qo'shildi:\n"
-        f"<b>{name}</b> — {fmt(qty)} dona x {fmt(price)} so'm = <b>{fmt(total)} so'm</b>",
-        parse_mode="HTML",
-        reply_markup=main_menu,
+    await update.message.reply_text(
+        t("sale_done", lang, name=item["name"], qty=qty, price=price, total=total, profit=profit),
+        reply_markup=main_menu_keyboard(lang),
     )
+    return ConversationHandler.END
 
 
-# ==== OMBOR (mahsulotlar ro'yxati) ====
-@router.message(F.text == "📦 Ombor")
-async def list_products(message: Message):
-    products = await db.get_products(message.from_user.id)
-    if not products:
-        await message.answer("Omborda hozircha mahsulot yo'q.")
-        return
+# ---------------- CHIQIM ----------------
 
-    text = "📦 <b>Ombordagi mahsulotlar:</b>\n\n"
-    for p in products:
-        text += (
-            f"• {p['name']} — qoldiq: {fmt(p['quantity'])} dona, "
-            f"tannarx: {fmt(p['purchase_price'])} so'm\n"
+async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(t("expense_desc", lang), reply_markup=cancel_keyboard(lang))
+    return EXPENSE_DESC
+
+
+async def expense_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    context.user_data["expense_desc"] = update.message.text.strip()
+    await update.message.reply_text(t("expense_amount", lang))
+    return EXPENSE_AMOUNT
+
+
+async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return EXPENSE_AMOUNT
+
+    desc = context.user_data["expense_desc"]
+    db.add_expense(desc, amount)
+    await update.message.reply_text(
+        t("expense_done", lang, desc=desc, amount=amount),
+        reply_markup=main_menu_keyboard(lang),
+    )
+    return ConversationHandler.END
+
+
+# ---------------- KASSA ----------------
+
+async def cash_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    status = db.get_cash_status()
+    if status:
+        await update.message.reply_text(
+            t("cash_already_open", lang, date=status["opened_at"][:16].replace("T", " "), amount=status["opening_balance"]),
         )
-    await message.answer(text, parse_mode="HTML")
-
-
-# ==== SOTISH ====
-@router.message(F.text == "💰 Sotish")
-async def sell_start(message: Message, state: FSMContext):
-    products = await db.get_products(message.from_user.id, only_in_stock=True)
-    if not products:
-        await message.answer(
-            "Sotish uchun omborda mahsulot yo'q. Avval \"📥 Mahsulot kiritish\" orqali kiriting."
-        )
-        return
-
-    buttons = [
-        [InlineKeyboardButton(
-            text=f"{p['name']} (qoldiq: {fmt(p['quantity'])})",
-            callback_data=f"sell_{p['id']}",
-        )]
-        for p in products
-    ]
-    await message.answer(
-        "Qaysi mahsulotni sotdingiz?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@router.callback_query(F.data.startswith("sell_"))
-async def sell_pick_product(callback: CallbackQuery, state: FSMContext):
-    product_id = int(callback.data.split("_")[1])
-    product = await db.get_product_by_id(product_id)
-    if not product or product["quantity"] <= 0:
-        await callback.answer("Bu mahsulot omborda yo'q.", show_alert=True)
-        return
-
-    await state.update_data(product=product)
-    await state.set_state(SellProduct.quantity)
-    await callback.message.answer(
-        f"<b>{product['name']}</b> dan nechta sotdingiz? (qoldiq: {fmt(product['quantity'])})",
-        parse_mode="HTML",
-        reply_markup=cancel_menu,
-    )
-    await callback.answer()
-
-
-@router.message(SellProduct.quantity)
-async def sell_quantity(message: Message, state: FSMContext):
-    qty = parse_number(message.text)
-    data = await state.get_data()
-    product = data["product"]
-
-    if qty is None or qty <= 0:
-        await message.answer("Iltimos, musbat son kiriting.")
-        return
-    if qty > product["quantity"]:
-        await message.answer(
-            f"Omborda faqat {fmt(product['quantity'])} dona bor. Kamroq son kiriting."
-        )
-        return
-
-    await state.update_data(quantity=qty)
-    await state.set_state(SellProduct.price)
-    suggested = product["sale_price"] or ""
-    hint = f" (oxirgi narx: {fmt(product['sale_price'])})" if product["sale_price"] else ""
-    await message.answer(f"Har birini necha so'mdan sotdingiz?{hint}")
-
-
-@router.message(SellProduct.price)
-async def sell_price(message: Message, state: FSMContext):
-    price = parse_number(message.text)
-    if price is None or price <= 0:
-        await message.answer("Iltimos, narxni to'g'ri kiriting. Masalan: 5000")
-        return
-
-    await state.update_data(sell_price=price)
-    await state.set_state(SellProduct.date)
-    await message.answer(
-        "Bu sotuv qaysi sanaga tegishli?",
-        reply_markup=date_choice_menu,
-    )
-
-
-async def finalize_sale(target_message: Message, owner_id: int, state: FSMContext, sale_date: str = None):
-    data = await state.get_data()
-    product = data["product"]
-    qty = data["quantity"]
-    price = data["sell_price"]
-
-    revenue, cost, profit = await db.record_sale(
-        owner_id, product["name"], qty, price, product["purchase_price"], sale_date
-    )
-    await db.decrease_stock(product["id"], qty)
-    await db.set_sale_price(product["id"], price)
-
-    if profit >= 0:
-        result_line = f"✅ Foyda: <b>{fmt(profit)} so'm</b>"
+        await update.message.reply_text(t("cash_close_amount", lang), reply_markup=cancel_keyboard(lang))
+        return CASH_CLOSE_AMOUNT
     else:
-        result_line = f"🔴 Zarar: <b>{fmt(abs(profit))} so'm</b>"
-
-    date_line = f"Sana: {sale_date}\n" if sale_date else ""
-
-    await state.clear()
-    await target_message.answer(
-        f"🧾 <b>Sotuv qayd etildi:</b>\n\n"
-        f"{date_line}"
-        f"{product['name']} — {fmt(qty)} dona x {fmt(price)} so'm\n"
-        f"Tushum: {fmt(revenue)} so'm\n"
-        f"Tannarx: {fmt(cost)} so'm\n"
-        f"{result_line}",
-        parse_mode="HTML",
-        reply_markup=main_menu,
-    )
+        await update.message.reply_text(t("cash_open_amount", lang), reply_markup=cancel_keyboard(lang))
+        return CASH_OPEN_AMOUNT
 
 
-@router.callback_query(SellProduct.date, F.data == "date_today")
-async def sell_date_today(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete_reply_markup()
-    await finalize_sale(callback.message, callback.from_user.id, state, None)
-    await callback.answer()
+async def cash_open_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return CASH_OPEN_AMOUNT
+    db.open_cash(amount)
+    await update.message.reply_text(t("cash_opened", lang, amount=amount), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
 
 
-@router.callback_query(SellProduct.date, F.data == "date_custom")
-async def sell_date_custom(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete_reply_markup()
-    await callback.message.answer(
-        "Sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
-        reply_markup=cancel_menu,
-    )
-    await callback.answer()
+async def cash_close_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return CASH_CLOSE_AMOUNT
+    db.close_cash(amount)
+    await update.message.reply_text(t("cash_closed", lang, amount=amount), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
 
 
-@router.message(SellProduct.date)
-async def sell_date_text(message: Message, state: FSMContext):
-    parsed = parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.06.2026"
-        )
-        return
-    await finalize_sale(message, message.from_user.id, state, parsed.isoformat())
+# ---------------- HISOBOT ----------------
 
-
-# ==== CHIQIM QO'SHISH ====
-@router.message(F.text == "💸 Chiqim qo'shish")
-async def add_expense_start(message: Message, state: FSMContext):
-    await state.set_state(AddExpense.name)
-    await message.answer(
-        "Chiqim nomini kiriting (masalan: Ijara, Transport):",
-        reply_markup=cancel_menu,
-    )
-
-
-@router.message(AddExpense.name)
-async def add_expense_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text.strip())
-    await state.set_state(AddExpense.amount)
-    await message.answer("Summasini kiriting (so'mda):")
-
-
-@router.message(AddExpense.amount)
-async def add_expense_amount(message: Message, state: FSMContext):
-    amount = parse_number(message.text)
-    if amount is None or amount <= 0:
-        await message.answer("Iltimos, summani to'g'ri kiriting. Masalan: 50000")
-        return
-
-    await state.update_data(amount=amount)
-    await state.set_state(AddExpense.date)
-    await message.answer(
-        "Bu chiqim qaysi sanaga tegishli?",
-        reply_markup=date_choice_menu,
-    )
-
-
-async def finalize_expense(target_message: Message, owner_id: int, state: FSMContext, expense_date: str = None):
-    data = await state.get_data()
-    name = data["name"]
-    amount = data["amount"]
-    await db.add_expense(owner_id, name, amount, expense_date)
-
-    date_line = f"Sana: {expense_date}\n" if expense_date else ""
-
-    await state.clear()
-    await target_message.answer(
-        f"✅ Chiqim qo'shildi:\n{date_line}<b>{name}</b> — {fmt(amount)} so'm",
-        parse_mode="HTML",
-        reply_markup=main_menu,
-    )
-
-
-@router.callback_query(AddExpense.date, F.data == "date_today")
-async def expense_date_today(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete_reply_markup()
-    await finalize_expense(callback.message, callback.from_user.id, state, None)
-    await callback.answer()
-
-
-@router.callback_query(AddExpense.date, F.data == "date_custom")
-async def expense_date_custom(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete_reply_markup()
-    await callback.message.answer(
-        "Sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
-        reply_markup=cancel_menu,
-    )
-    await callback.answer()
-
-
-@router.message(AddExpense.date)
-async def expense_date_text(message: Message, state: FSMContext):
-    parsed = parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.06.2026"
-        )
-        return
-    await finalize_expense(message, message.from_user.id, state, parsed.isoformat())
-
-
-# ==== SOTUVLAR TARIXI ====
-@router.message(F.text == "📜 Sotuvlar tarixi")
-async def sales_history(message: Message):
-    sales = await db.get_sales(message.from_user.id, limit=15)
-    if not sales:
-        await message.answer("Hozircha sotuvlar yo'q.")
-        return
-
-    text = "📜 <b>Oxirgi sotuvlar:</b>\n\n"
-    for s in sales:
-        sign = "✅" if s["profit"] >= 0 else "🔴"
-        text += (
-            f"{sign} {s['product_name']} — {fmt(s['quantity'])} dona, "
-            f"foyda: {fmt(s['profit'])} so'm ({s['created_at']})\n"
-        )
-    await message.answer(text, parse_mode="HTML")
-
-
-# ==== STATISTIKA (davr tanlash) ====
-@router.message(F.text == "📊 Statistika")
-async def stats_menu(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Qaysi davr uchun hisobot kerak?", reply_markup=period_menu)
-
-
-async def send_stats_report(message: Message, owner_id: int, date_from: str, date_to: str, title: str):
-    s = await db.get_stats(owner_id, date_from, date_to)
-    net = s["net_profit"]
-    net_line = (
-        f"✅ <b>Sof foyda: {fmt(net)} so'm</b>"
-        if net >= 0
-        else f"🔴 <b>Sof zarar: {fmt(abs(net))} so'm</b>"
-    )
-
-    await message.answer(
-        f"📊 <b>Hisobot: {title}</b>\n\n"
-        f"Jami sotuvlar soni: {s['sale_count']}\n"
-        f"Jami tushum: {fmt(s['total_revenue'])} so'm\n"
-        f"Jami tannarx (sotilganlar): {fmt(s['total_cost'])} so'm\n"
-        f"Sotuvdan foyda: {fmt(s['total_sales_profit'])} so'm\n"
-        f"Qo'shimcha chiqimlar: {fmt(s['total_expenses'])} so'm\n\n"
-        f"{net_line}",
-        parse_mode="HTML",
-        reply_markup=main_menu,
-    )
-
-
-@router.callback_query(F.data.startswith("period_"))
-async def period_chosen(callback: CallbackQuery, state: FSMContext):
-    choice = callback.data.replace("period_", "")
-    today = date.today()
-    owner_id = callback.from_user.id
-
-    if choice == "today":
-        d_from = d_to = today
-        title = f"Bugun ({today.strftime('%d.%m.%Y')})"
-    elif choice == "week":
-        d_from = today - timedelta(days=today.weekday())  # dushanbadan
-        d_to = today
-        title = f"Bu hafta ({d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')})"
-    elif choice == "month":
-        d_from = today.replace(day=1)
-        d_to = today
-        title = f"Bu oy ({d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')})"
-    elif choice == "year":
-        d_from = today.replace(month=1, day=1)
-        d_to = today
-        title = f"Bu yil ({d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')})"
-    elif choice == "all":
-        await callback.message.delete_reply_markup()
-        await send_stats_report(callback.message, owner_id, None, None, "Hammasi (boshidan)")
-        await callback.answer()
-        return
-    elif choice == "custom":
-        await state.set_state(CustomPeriod.date_from)
-        await callback.message.answer(
-            "Boshlang'ich sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
-            reply_markup=cancel_menu,
-        )
-        await callback.answer()
-        return
+def period_range(period):
+    """Berilgan davr nomi uchun (boshlanish, tugash, label) ni qaytaradi."""
+    now = datetime.now()
+    if period == "daily":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = f"Kunlik ({start.strftime('%d.%m.%Y')})"
+    elif period == "weekly":
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        label = f"Haftalik ({start.strftime('%d.%m.%Y')} - {now.strftime('%d.%m.%Y')})"
+    elif period == "monthly":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        label = f"Oylik ({start.strftime('%m.%Y')})"
+    elif period == "yearly":
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        label = f"Yillik ({start.strftime('%Y')})"
     else:
-        await callback.answer()
-        return
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "Bugun"
+    return start.isoformat(), now.isoformat(), label
 
-    await callback.message.delete_reply_markup()
-    await send_stats_report(
-        callback.message, owner_id, d_from.isoformat(), d_to.isoformat(), title
+
+async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(t("report_choose_period", lang), reply_markup=report_period_keyboard(lang))
+
+
+async def report_period_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    query = update.callback_query
+    await query.answer()
+    period = query.data.split("_", 1)[1]
+
+    if period == "custom":
+        await query.message.reply_text(t("report_custom_prompt", lang), reply_markup=cancel_keyboard(lang))
+        return REPORT_CUSTOM_DATE
+
+    start_iso, end_iso, label = period_range(period)
+    await send_report(query.message, context, start_iso, end_iso, label, lang)
+    return ConversationHandler.END
+
+
+async def report_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+
+    match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})\s*-\s*(\d{2})\.(\d{2})\.(\d{4})", update.message.text.strip())
+    if not match:
+        await update.message.reply_text(t("invalid_date", lang))
+        return REPORT_CUSTOM_DATE
+
+    d1, m1, y1, d2, m2, y2 = match.groups()
+    try:
+        start = datetime(int(y1), int(m1), int(d1))
+        end = datetime(int(y2), int(m2), int(d2), 23, 59, 59)
+    except ValueError:
+        await update.message.reply_text(t("invalid_date", lang))
+        return REPORT_CUSTOM_DATE
+
+    label = f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}"
+    await send_report(update.message, context, start.isoformat(), end.isoformat(), label, lang)
+    return ConversationHandler.END
+
+
+async def send_report(message, context, start_iso, end_iso, label, lang):
+    report = db.get_report(start_iso, end_iso)
+    context.user_data["last_report"] = report
+    context.user_data["last_report_label"] = label
+
+    result_label = t("profit_label", lang) if report["net_profit"] >= 0 else t("loss_label", lang)
+    text = t(
+        "report_text", lang,
+        period=label,
+        income=f"{report['total_income']:,.0f}",
+        expenses=f"{report['total_expenses']:,.0f}",
+        gross_profit=f"{report['total_gross_profit']:,.0f}",
+        result_label=result_label,
+        net_profit=f"{report['net_profit']:,.0f}",
     )
-    await callback.answer()
+    await message.reply_text(text, reply_markup=main_menu_keyboard(lang))
 
 
-@router.message(CustomPeriod.date_from)
-async def custom_period_from(message: Message, state: FSMContext):
-    parsed = parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.06.2026"
-        )
+# ---------------- PDF / EXCEL / GRAFIK / AI ----------------
+
+async def send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    report = context.user_data.get("last_report")
+    if not report:
+        await update.message.reply_text(t("no_report_yet", lang))
         return
-    await state.update_data(date_from=parsed)
-    await state.set_state(CustomPeriod.date_to)
-    await message.answer("Tugash sanasini kiriting (KK.OO.YYYY), masalan: 14.07.2026")
+    await update.message.reply_text(t("generating", lang))
+    path = generate_pdf(report, context.user_data.get("last_report_label", ""))
+    with open(path, "rb") as f:
+        await update.message.reply_document(f, caption=t("pdf_ready", lang))
 
 
-@router.message(CustomPeriod.date_to)
-async def custom_period_to(message: Message, state: FSMContext):
-    parsed = parse_date(message.text)
-    if not parsed:
-        await message.answer(
-            "Sana formati noto'g'ri. Iltimos, KK.OO.YYYY ko'rinishida kiriting, masalan: 14.07.2026"
-        )
+async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    report = context.user_data.get("last_report")
+    if not report:
+        await update.message.reply_text(t("no_report_yet", lang))
+        return
+    await update.message.reply_text(t("generating", lang))
+    path = generate_excel(report, context.user_data.get("last_report_label", ""))
+    with open(path, "rb") as f:
+        await update.message.reply_document(f, caption=t("excel_ready", lang))
+
+
+async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    report = context.user_data.get("last_report")
+    if not report:
+        await update.message.reply_text(t("no_report_yet", lang))
+        return
+    await update.message.reply_text(t("generating", lang))
+    path = generate_chart(report, context.user_data.get("last_report_label", ""))
+    with open(path, "rb") as f:
+        await update.message.reply_photo(f, caption=t("chart_ready", lang))
+
+
+async def send_ai_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    report = context.user_data.get("last_report")
+    if not report:
+        await update.message.reply_text(t("no_report_yet", lang))
+        return
+    if not ANTHROPIC_API_KEY:
+        await update.message.reply_text(t("ai_no_key", lang))
         return
 
-    data = await state.get_data()
-    d_from = data["date_from"]
-    d_to = parsed
+    await update.message.reply_text(t("ai_analyzing", lang))
+    try:
+        import requests
+        prompt = (
+            f"Do'kon hisoboti: kirim {report['total_income']:.0f} so'm, "
+            f"chiqim {report['total_expenses']:.0f} so'm, "
+            f"sof foyda/zarar {report['net_profit']:.0f} so'm. "
+            f"Sotuvlar soni: {len(report['sales'])}. "
+            "Shu ma'lumotlar asosida qisqa (5-6 gapli) tahlil va tavsiya yozib ber, o'zbek tilida."
+        )
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        data = resp.json()
+        analysis = "".join(block.get("text", "") for block in data.get("content", []))
+        await update.message.reply_text(f"🤖 {analysis}")
+    except Exception as e:
+        logger.error("AI xatolik: %s", e)
+        await update.message.reply_text("❗ AI tahlilida xatolik yuz berdi.")
 
-    if d_to < d_from:
-        d_from, d_to = d_to, d_from
 
-    title = f"{d_from.strftime('%d.%m.%Y')} — {d_to.strftime('%d.%m.%Y')}"
-    await state.clear()
-    await send_stats_report(message, message.from_user.id, d_from.isoformat(), d_to.isoformat(), title)
+# ---------------- TIL ----------------
+
+async def lang_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(t("choose_lang", get_lang(context)), reply_markup=language_keyboard())
 
 
-# ==== ISHGA TUSHIRISH ====
-async def main():
-    await db.init_db()
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
+async def lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = query.data.split("_", 1)[1]
+    context.user_data["lang"] = lang
+    await query.message.reply_text(t("main_menu", lang), reply_markup=main_menu_keyboard(lang))
 
-    print("Bot ishga tushdi...")
-    await dp.start_polling(bot)
+
+# ---------------- BEKOR QILISH / XATOLIK ----------------
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(t("cancelled", lang), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Xatolik:", exc_info=context.error)
+
+
+# ---------------- MAIN ----------------
+
+def main():
+    db.init_db()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+
+    # Ombor
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📦 Ombor$"), ombor_start)],
+        states={
+            OMBOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_name)],
+            OMBOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_price)],
+            OMBOR_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_qty)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
+    # Sotish
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💰 Sotish$"), sale_start)],
+        states={
+            SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
+            SALE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_price)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+    app.add_handler(CallbackQueryHandler(sale_item_chosen, pattern="^item_"))
+
+    # Chiqim
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💸 Chiqim$"), expense_start)],
+        states={
+            EXPENSE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_desc)],
+            EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_amount)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
+    # Kassa
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💵 Kassa$"), cash_start)],
+        states={
+            CASH_OPEN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_open_amount)],
+            CASH_CLOSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_close_amount)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
+    # Hisobot
+    app.add_handler(MessageHandler(filters.Regex("^📊 Hisobot$"), report_start))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(report_period_chosen, pattern="^period_")],
+        states={
+            REPORT_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_custom_date)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
+    # PDF / Excel / Grafik / AI
+    app.add_handler(MessageHandler(filters.Regex("^📄 PDF$"), send_pdf))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Excel$"), send_excel))
+    app.add_handler(MessageHandler(filters.Regex("^📈 Grafiklar$"), send_chart))
+    app.add_handler(MessageHandler(filters.Regex("^🤖 AI tahlili$"), send_ai_analysis))
+
+    # Til
+    app.add_handler(MessageHandler(filters.Regex("^🌐 Til$"), lang_start))
+    app.add_handler(CallbackQueryHandler(lang_chosen, pattern="^lang_"))
+
+    app.add_error_handler(error_handler)
+
+    print("Bot ishga tushdi... To'xtatish uchun Ctrl+C bosing.")
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

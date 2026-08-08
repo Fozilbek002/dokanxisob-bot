@@ -1,215 +1,207 @@
-import aiosqlite
+"""
+database.py — SQLite ma'lumotlar bazasi bilan ishlash
 
-DB_NAME = "shop.db"
+Jadvallar:
+    items      — ombordagi mahsulotlar (nomi, kelish narxi, miqdori)
+    sales      — sotuvlar tarixi (qaysi mahsulot, necha dona, qancha narxda sotilgan)
+    expenses   — chiqimlar (masalan: ijara, transport, ish haqi va h.k.)
+    cash       — kassa ochish/yopish tarixi
+"""
 
+import sqlite3
+from datetime import datetime
 
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        # Mahsulotlar (ombor) - har bir mahsulotning joriy qoldig'i va tannarxi
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                purchase_price REAL NOT NULL,
-                sale_price REAL,
-                quantity REAL NOT NULL DEFAULT 0,
-                UNIQUE(owner_id, name)
-            )
-        """)
-        # Sotuvlar tarixi
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS sales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_id INTEGER NOT NULL,
-                product_name TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                sale_price REAL NOT NULL,
-                purchase_price REAL NOT NULL,
-                revenue REAL NOT NULL,
-                cost REAL NOT NULL,
-                profit REAL NOT NULL,
-                created_at TEXT DEFAULT (datetime('now', 'localtime'))
-            )
-        """)
-        # Qo'shimcha chiqimlar (ijara, transport va h.k.)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                amount REAL NOT NULL,
-                created_at TEXT DEFAULT (datetime('now', 'localtime'))
-            )
-        """)
-        await db.commit()
+DB_PATH = "hisobot_bot.db"
 
 
-# ==== MAHSULOTLAR (KIRIM) ====
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-async def add_or_update_product(owner_id: int, name: str, purchase_price: float, quantity: float):
-    """Mahsulot kiritish: mavjud bo'lsa qoldiqni oshiradi va tannarxni yangilaydi, yo'q bo'lsa yaratadi.
-    Eslatma: kirim sanasi alohida qayd etilmaydi, chunki ombor - joriy qoldiq holati."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT id, quantity FROM products WHERE owner_id = ? AND name = ?",
-            (owner_id, name),
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            purchase_price REAL NOT NULL,
+            quantity REAL NOT NULL,
+            unit TEXT DEFAULT 'dona',
+            created_at TEXT NOT NULL
         )
-        row = await cursor.fetchone()
-        if row:
-            product_id, current_qty = row
-            new_qty = current_qty + quantity
-            await db.execute(
-                "UPDATE products SET purchase_price = ?, quantity = ? WHERE id = ?",
-                (purchase_price, new_qty, product_id),
-            )
-        else:
-            await db.execute(
-                """INSERT INTO products (owner_id, name, purchase_price, quantity)
-                   VALUES (?, ?, ?, ?)""",
-                (owner_id, name, purchase_price, quantity),
-            )
-        await db.commit()
+    """)
 
-
-async def get_products(owner_id: int, only_in_stock: bool = False):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        query = "SELECT * FROM products WHERE owner_id = ?"
-        if only_in_stock:
-            query += " AND quantity > 0"
-        query += " ORDER BY name"
-        cursor = await db.execute(query, (owner_id,))
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-
-async def get_product_by_id(product_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM products WHERE id = ?", (product_id,))
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-
-async def set_sale_price(product_id: int, sale_price: float):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "UPDATE products SET sale_price = ? WHERE id = ?", (sale_price, product_id)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            sale_price REAL NOT NULL,
+            purchase_price REAL NOT NULL,
+            total REAL NOT NULL,
+            profit REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES items (id)
         )
-        await db.commit()
+    """)
 
-
-async def decrease_stock(product_id: int, quantity: float):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "UPDATE products SET quantity = quantity - ? WHERE id = ?",
-            (quantity, product_id),
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at TEXT NOT NULL
         )
-        await db.commit()
+    """)
 
-
-# ==== SOTUVLAR ====
-
-async def record_sale(owner_id: int, product_name: str, quantity: float,
-                       sale_price: float, purchase_price: float, sale_date: str = None):
-    """sale_date: 'YYYY-MM-DD' formatida (ixtiyoriy). Berilmasa, hozirgi sana ishlatiladi."""
-    revenue = sale_price * quantity
-    cost = purchase_price * quantity
-    profit = revenue - cost
-    async with aiosqlite.connect(DB_NAME) as db:
-        if sale_date:
-            await db.execute(
-                """INSERT INTO sales
-                   (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit,
-                 f"{sale_date} 12:00:00"),
-            )
-        else:
-            await db.execute(
-                """INSERT INTO sales
-                   (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (owner_id, product_name, quantity, sale_price, purchase_price, revenue, cost, profit),
-            )
-        await db.commit()
-    return revenue, cost, profit
-
-
-async def get_sales(owner_id: int, limit: int = 15):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM sales WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
-            (owner_id, limit),
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cash (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,
+            opening_balance REAL,
+            closing_balance REAL,
+            opened_at TEXT,
+            closed_at TEXT
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+    """)
+
+    conn.commit()
+    conn.close()
 
 
-# ==== CHIQIMLAR ====
+# ---------------- OMBOR (ITEMS) ----------------
 
-async def add_expense(owner_id: int, name: str, amount: float, expense_date: str = None):
-    """expense_date: 'YYYY-MM-DD' formatida (ixtiyoriy). Berilmasa, hozirgi sana ishlatiladi."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        if expense_date:
-            await db.execute(
-                "INSERT INTO expenses (owner_id, name, amount, created_at) VALUES (?, ?, ?, ?)",
-                (owner_id, name, amount, f"{expense_date} 12:00:00"),
-            )
-        else:
-            await db.execute(
-                "INSERT INTO expenses (owner_id, name, amount) VALUES (?, ?, ?)",
-                (owner_id, name, amount),
-            )
-        await db.commit()
+def add_item(name, purchase_price, quantity, unit="dona"):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO items (name, purchase_price, quantity, unit, created_at) VALUES (?, ?, ?, ?, ?)",
+        (name, purchase_price, quantity, unit, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
 
 
-async def get_expenses(owner_id: int, limit: int = 15):
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM expenses WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
-            (owner_id, limit),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+def get_items():
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM items ORDER BY name").fetchall()
+    conn.close()
+    return rows
 
 
-# ==== STATISTIKA ====
+def get_item(item_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    conn.close()
+    return row
 
-async def get_stats(owner_id: int, date_from: str = None, date_to: str = None):
-    """date_from / date_to: 'YYYY-MM-DD' formatida, ikkalasi ham qamrab olinadi (inclusive).
-    Agar ikkalasi ham None bo'lsa, butun vaqt hisoblanadi."""
-    async with aiosqlite.connect(DB_NAME) as db:
-        if date_from and date_to:
-            date_filter = "AND date(created_at) BETWEEN ? AND ?"
-            params = (owner_id, date_from, date_to)
-        else:
-            date_filter = ""
-            params = (owner_id,)
 
-        cursor = await db.execute(
-            f"""SELECT COUNT(*), COALESCE(SUM(revenue),0), COALESCE(SUM(cost),0), COALESCE(SUM(profit),0)
-               FROM sales WHERE owner_id = ? {date_filter}""",
-            params,
-        )
-        sale_count, total_revenue, total_cost, total_sales_profit = await cursor.fetchone()
+def update_stock(item_id, new_quantity):
+    conn = get_conn()
+    conn.execute("UPDATE items SET quantity = ? WHERE id = ?", (new_quantity, item_id))
+    conn.commit()
+    conn.close()
 
-        cursor = await db.execute(
-            f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE owner_id = ? {date_filter}",
-            params,
-        )
-        (total_expenses,) = await cursor.fetchone()
 
-        net_profit = total_sales_profit - total_expenses
+# ---------------- SOTISH (SALES) ----------------
 
-        return {
-            "sale_count": sale_count,
-            "total_revenue": total_revenue,
-            "total_cost": total_cost,
-            "total_sales_profit": total_sales_profit,
-            "total_expenses": total_expenses,
-            "net_profit": net_profit,
-        }
+def add_sale(item_id, item_name, quantity, sale_price, purchase_price):
+    total = quantity * sale_price
+    profit = total - (quantity * purchase_price)
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO sales
+           (item_id, item_name, quantity, sale_price, purchase_price, total, profit, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (item_id, item_name, quantity, sale_price, purchase_price, total, profit, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_sales(start_iso, end_iso):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM sales WHERE created_at BETWEEN ? AND ? ORDER BY created_at",
+        (start_iso, end_iso),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ---------------- CHIQIM (EXPENSES) ----------------
+
+def add_expense(description, amount):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO expenses (description, amount, created_at) VALUES (?, ?, ?)",
+        (description, amount, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_expenses(start_iso, end_iso):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM expenses WHERE created_at BETWEEN ? AND ? ORDER BY created_at",
+        (start_iso, end_iso),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ---------------- KASSA ----------------
+
+def open_cash(opening_balance):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO cash (status, opening_balance, opened_at) VALUES ('ochiq', ?, ?)",
+        (opening_balance, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def close_cash(closing_balance):
+    conn = get_conn()
+    conn.execute(
+        """UPDATE cash SET status = 'yopiq', closing_balance = ?, closed_at = ?
+           WHERE status = 'ochiq'""",
+        (closing_balance, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_cash_status():
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM cash WHERE status = 'ochiq' ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return row
+
+
+# ---------------- HISOBOT (REPORT) ----------------
+
+def get_report(start_iso, end_iso):
+    """Berilgan davr uchun kirim, chiqim, foyda/zarar hisoblaydi."""
+    sales = get_sales(start_iso, end_iso)
+    expenses = get_expenses(start_iso, end_iso)
+
+    total_income = sum(s["total"] for s in sales)          # jami sotuv summasi (kirim)
+    total_gross_profit = sum(s["profit"] for s in sales)    # sotuvdan sof foyda (tannarxsiz)
+    total_expenses = sum(e["amount"] for e in expenses)     # jami chiqimlar
+    net_profit = total_gross_profit - total_expenses        # sof foyda/zarar
+
+    return {
+        "sales": sales,
+        "expenses": expenses,
+        "total_income": total_income,
+        "total_gross_profit": total_gross_profit,
+        "total_expenses": total_expenses,
+        "net_profit": net_profit,
+    }
