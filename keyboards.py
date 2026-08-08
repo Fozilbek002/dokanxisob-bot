@@ -8,11 +8,12 @@ from language import t
 
 def main_menu_keyboard(lang="uz_latin"):
     buttons = [
-        ["📦 Ombor", "💰 Sotish"],
-        ["💸 Chiqim", "💵 Kassa"],
-        ["📊 Hisobot", "📄 PDF"],
-        ["📊 Excel", "📈 Grafiklar"],
-        ["🤖 AI tahlili", "🌐 Til"],
+        ["📦 Ombor", "📋 Ro'yxat"],
+        ["💰 Sotish", "💸 Chiqim"],
+        ["💵 Kassa", "📊 Hisobot"],
+        ["📄 PDF", "📊 Excel"],
+        ["📈 Grafiklar", "🤖 AI tahlili"],
+        ["🌐 Til"],
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 

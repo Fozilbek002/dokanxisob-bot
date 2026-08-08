@@ -62,11 +62,11 @@ logger = logging.getLogger(__name__)
 # ---- CONVERSATION STATES ----
 (
     OMBOR_NAME, OMBOR_PRICE, OMBOR_QTY,
-    SALE_QTY, SALE_PRICE,
+    SALE_ITEM, SALE_QTY, SALE_PRICE,
     EXPENSE_DESC, EXPENSE_AMOUNT,
     CASH_OPEN_AMOUNT, CASH_CLOSE_AMOUNT,
     REPORT_CUSTOM_DATE,
-) = range(10)
+) = range(11)
 
 
 def get_lang(context):
@@ -93,6 +93,21 @@ async def ombor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
     await update.message.reply_text(t("ombor_name", lang), reply_markup=cancel_keyboard(lang))
     return OMBOR_NAME
+
+
+async def ombor_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    items = db.get_items()
+    if not items:
+        await update.message.reply_text(t("ombor_list_empty", lang))
+        return
+    lines = [t("ombor_list_header", lang), ""]
+    for item in items:
+        lines.append(
+            f"• {item['name']} — {item['quantity']} {item['unit']}, "
+            f"tannarx: {item['purchase_price']} so'm"
+        )
+    await update.message.reply_text("\n".join(lines))
 
 
 async def ombor_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +163,7 @@ async def sale_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("sale_no_items", lang), reply_markup=main_menu_keyboard(lang))
         return ConversationHandler.END
     await update.message.reply_text(t("sale_choose_item", lang), reply_markup=items_inline_keyboard(items))
-    return ConversationHandler.END  # tanlov inline callback orqali davom etadi
+    return SALE_ITEM
 
 
 async def sale_item_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -499,17 +514,18 @@ def main():
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
+    app.add_handler(MessageHandler(filters.Regex("^📋 Ro'yxat$"), ombor_list_show))
 
     # Sotish
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💰 Sotish$"), sale_start)],
         states={
+            SALE_ITEM: [CallbackQueryHandler(sale_item_chosen, pattern="^item_")],
             SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
             SALE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_price)],
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
-    app.add_handler(CallbackQueryHandler(sale_item_chosen, pattern="^item_"))
 
     # Chiqim
     app.add_handler(ConversationHandler(

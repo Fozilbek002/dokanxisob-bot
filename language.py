@@ -17,6 +17,8 @@ TEXTS = {
         "ombor_price": "Kelish (tannarx) narxini kiriting (so'm):",
         "ombor_qty": "Miqdorini kiriting:",
         "ombor_added": "✅ '{name}' omborga qo'shildi: {qty} dona, tannarx {price} so'm.",
+        "ombor_list_header": "📦 Ombordagi mahsulotlar:",
+        "ombor_list_empty": "Omborda hozircha mahsulot yo'q. \"📦 Ombor\" tugmasi orqali qo'shing.",
         # Sotish
         "sale_choose_item": "Qaysi mahsulotni sotasiz?",
         "sale_no_items": "Omborda mahsulot yo'q. Avval /ombor orqali mahsulot qo'shing.",
