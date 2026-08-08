@@ -21,7 +21,7 @@ Ishga tushirish:
     python bot.py
 
 Eslatma:
-    1. 8612572282:AAGNHC7CkXC3foUv1hWNZRkVHgV7IRGUOIM
+    1. @BotFather orqali token oling va BOT_TOKEN ga qo'ying.
     2. AI tahlili ishlashi uchun ANTHROPIC_API_KEY ni muhit o'zgaruvchisiga qo'ying (ixtiyoriy).
 """
 
@@ -53,7 +53,7 @@ from keyboards import (
 from reports import generate_excel, generate_pdf, generate_chart
 
 # ---- SOZLAMALAR ----
-BOT_TOKEN = "8903276242:AAGnblSuc9Id8A5RgaG1PiGBLxSIUWdgTxw"
+BOT_TOKEN = "8612572282:AAGNHC7CkXC3foUv1hWNZRkVHgV7IRGUOIM"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -554,8 +554,14 @@ def main():
     app.add_error_handler(error_handler)
 
     print("Bot ishga tushdi... To'xtatish uchun Ctrl+C bosing.")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    main()
+    import time
+    while True:
+        try:
+            main()
+        except Exception as e:
+            logger.exception("Bot yiqildi, 5 soniyadan keyin qayta ishga tushadi: %s", e)
+            time.sleep(5)

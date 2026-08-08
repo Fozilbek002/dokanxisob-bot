@@ -8,10 +8,11 @@ Jadvallar:
     cash       — kassa ochish/yopish tarixi
 """
 
+import os
 import sqlite3
 from datetime import datetime
 
-DB_PATH = "hisobot_bot.db"
+DB_PATH = os.environ.get("DB_PATH", "hisobot_bot.db")
 
 
 def get_conn():
