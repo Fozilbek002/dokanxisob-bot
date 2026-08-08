@@ -21,7 +21,7 @@ Ishga tushirish:
     python bot.py
 
 Eslatma:
-    1. @BotFather orqali token oling va BOT_TOKEN ga qo'ying.
+    1. 8612572282:AAGNHC7CkXC3foUv1hWNZRkVHgV7IRGUOIM
     2. AI tahlili ishlashi uchun ANTHROPIC_API_KEY ni muhit o'zgaruvchisiga qo'ying (ixtiyoriy).
 """
 
