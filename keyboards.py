@@ -8,9 +8,10 @@ from language import t
 
 def main_menu_keyboard(lang="uz_latin"):
     buttons = [
-        ["📦 Ombor", "📋 Ro'yxat"],
+        ["📦 Ombor", "➕ Mahsulot qo'shish"],
         ["💰 Sotish", "💸 Chiqim"],
-        ["💵 Kassa", "📊 Hisobot"],
+        ["💵 Kassa", "⚙️ Doimiy xarajat"],
+        ["📊 Hisobot", "📄 Ombor PDF"],
         ["📄 PDF", "📊 Excel"],
         ["📈 Grafiklar", "🤖 AI tahlili"],
         ["🌐 Til"],
@@ -32,6 +33,30 @@ def items_inline_keyboard(items):
                 callback_data=f"item_{item['id']}",
             )
         ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def date_choice_keyboard():
+    buttons = [
+        [InlineKeyboardButton("📆 Bugun", callback_data="date_today")],
+        [InlineKeyboardButton("🗓 Boshqa sana kiritish", callback_data="date_custom")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def cash_actions_keyboard():
+    buttons = [
+        [InlineKeyboardButton("➕ Qo'lda kirim qo'shish", callback_data="cash_in")],
+        [InlineKeyboardButton("➖ Qo'lda chiqim (pul olish)", callback_data="cash_out")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def recurring_cost_keyboard():
+    buttons = [
+        [InlineKeyboardButton("🏠 Ijara", callback_data="rec_ijara")],
+        [InlineKeyboardButton("🚚 Yuk tashish", callback_data="rec_yuk")],
+    ]
     return InlineKeyboardMarkup(buttons)
 
 

@@ -3,32 +3,26 @@ Do'kon hisob-kitob Telegram boti
 =================================
 
 Imkoniyatlar:
-    📦 Ombor           — mahsulot kiritish (nomi, tannarxi, miqdori)
-    💰 Sotish          — mahsulot sotish, ombordan avtomatik ayirish
-    💸 Chiqim          — xarajatlarni yozib borish
-    💵 Kassa           — kassa ochish / yopish
-    📊 Hisobot         — kunlik / haftalik / oylik / yillik / sana bo'yicha
-    📄 PDF             — hisobotni PDF shaklida yuklab olish
-    📊 Excel           — hisobotni Excel shaklida yuklab olish
-    📈 Grafiklar       — kunlik foyda/zarar diagrammasi
-    🤖 AI tahlili      — Anthropic API orqali matnli tahlil (ixtiyoriy)
-    🌐 Til             — O'zbek(lotin/kirill) / Rus / Ingliz
+    📦 Ombor              — ombordagi mahsulotlar ro'yxati
+    ➕ Mahsulot qo'shish   — yangi mahsulot kiritish
+    💰 Sotish             — mahsulot sotish (sana tanlash bilan), kassaga avtomatik kirim
+    💸 Chiqim             — xarajatlarni yozib borish
+    💵 Kassa              — joriy kassa balansini ko'rish, qo'lda kirim/chiqim
+    ⚙️ Doimiy xarajat     — ijara va yuk tashish oylik summasi (kunlik hisobotga bo'linadi)
+    📊 Hisobot            — kunlik / haftalik / oylik / yillik / erkin sana oralig'i
+    📄 Ombor PDF          — ombordagi mahsulotlar ro'yxati PDF shaklida
+    📄 PDF / 📊 Excel / 📈 Grafiklar — hisobot fayllari
+    🤖 AI tahlili         — Anthropic API orqali matnli tahlil (ixtiyoriy)
+    🌐 Til                — O'zbek(lotin/kirill) / Rus / Ingliz
 
-O'rnatish:
-    pip install python-telegram-bot --upgrade openpyxl reportlab matplotlib requests
-
-Ishga tushirish:
-    python bot.py
-
-Eslatma:
-    1. @BotFather orqali token oling va BOT_TOKEN ga qo'ying.
-    2. AI tahlili ishlashi uchun ANTHROPIC_API_KEY ni muhit o'zgaruvchisiga qo'ying (ixtiyoriy).
+MUHIM: har bir Telegram foydalanuvchisi (owner_id) faqat o'z ma'lumotlarini ko'radi —
+ombor, sotuv, chiqim, kassa va hisobotlar butunlay alohida saqlanadi.
 """
 
 import os
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from telegram import Update
 from telegram.ext import (
@@ -47,10 +41,13 @@ from keyboards import (
     main_menu_keyboard,
     cancel_keyboard,
     items_inline_keyboard,
+    date_choice_keyboard,
+    cash_actions_keyboard,
+    recurring_cost_keyboard,
     report_period_keyboard,
     language_keyboard,
 )
-from reports import generate_excel, generate_pdf, generate_chart
+from reports import generate_excel, generate_pdf, generate_chart, generate_items_pdf
 
 # ---- SOZLAMALAR ----
 BOT_TOKEN = "8612572282:AAGNHC7CkXC3foUv1hWNZRkVHgV7IRGUOIM"
@@ -62,11 +59,12 @@ logger = logging.getLogger(__name__)
 # ---- CONVERSATION STATES ----
 (
     OMBOR_NAME, OMBOR_PRICE, OMBOR_QTY,
-    SALE_ITEM, SALE_QTY, SALE_PRICE,
+    SALE_ITEM, SALE_QTY, SALE_PRICE, SALE_DATE,
     EXPENSE_DESC, EXPENSE_AMOUNT,
-    CASH_OPEN_AMOUNT, CASH_CLOSE_AMOUNT,
+    CASH_IN_AMOUNT, CASH_OUT_AMOUNT,
+    RECURRING_AMOUNT,
     REPORT_CUSTOM_DATE,
-) = range(11)
+) = range(13)
 
 
 def get_lang(context):
@@ -75,6 +73,28 @@ def get_lang(context):
 
 def is_cancel(text, lang):
     return text == t("cancel", lang)
+
+
+def owner_id(update: Update):
+    return update.effective_user.id
+
+
+def fmt(n):
+    return f"{n:,.0f}".replace(",", " ")
+
+
+def parse_flexible_date(text):
+    """'14.06.2026', '5.6.2026', '14/06/2026' kabi turli formatlarni tushunadi."""
+    text = text.strip()
+    for sep in [".", "/", "-"]:
+        parts = text.split(sep)
+        if len(parts) == 3:
+            try:
+                d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                return date(y, m, d)
+            except (ValueError, IndexError):
+                continue
+    return None
 
 
 # ---------------- START ----------------
@@ -87,27 +107,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------------- OMBOR ----------------
-
-async def ombor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(context)
-    await update.message.reply_text(t("ombor_name", lang), reply_markup=cancel_keyboard(lang))
-    return OMBOR_NAME
-
+# ---------------- OMBOR (RO'YXAT) ----------------
 
 async def ombor_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
-    items = db.get_items()
+    items = db.get_items(owner_id(update))
     if not items:
         await update.message.reply_text(t("ombor_list_empty", lang))
         return
     lines = [t("ombor_list_header", lang), ""]
     for item in items:
         lines.append(
-            f"• {item['name']} — {item['quantity']} {item['unit']}, "
-            f"tannarx: {item['purchase_price']} so'm"
+            f"• {item['name']} — {fmt(item['quantity'])} {item['unit']}, "
+            f"tannarx: {fmt(item['purchase_price'])} so'm"
         )
     await update.message.reply_text("\n".join(lines))
+
+
+async def ombor_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    items = db.get_items(owner_id(update))
+    if not items:
+        await update.message.reply_text(t("ombor_list_empty", lang))
+        return
+    await update.message.reply_text(t("generating", lang))
+    path = generate_items_pdf(items)
+    with open(path, "rb") as f:
+        await update.message.reply_document(f, caption=t("ombor_pdf_ready", lang))
+
+
+# ---------------- MAHSULOT QO'SHISH ----------------
+
+async def ombor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    await update.message.reply_text(t("ombor_name", lang), reply_markup=cancel_keyboard(lang))
+    return OMBOR_NAME
 
 
 async def ombor_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,7 +179,7 @@ async def ombor_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = context.user_data["new_item_name"]
     price = context.user_data["new_item_price"]
-    db.add_item(name, price, qty)
+    db.add_item(owner_id(update), name, price, qty)
 
     await update.message.reply_text(
         t("ombor_added", lang, name=name, qty=qty, price=price),
@@ -158,7 +192,8 @@ async def ombor_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sale_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
-    items = db.get_items()
+    items = db.get_items(owner_id(update))
+    items = [i for i in items if i["quantity"] > 0]
     if not items:
         await update.message.reply_text(t("sale_no_items", lang), reply_markup=main_menu_keyboard(lang))
         return ConversationHandler.END
@@ -171,7 +206,10 @@ async def sale_item_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     item_id = int(query.data.split("_")[1])
-    item = db.get_item(item_id)
+    item = db.get_item(owner_id(update), item_id)
+    if not item:
+        await query.message.reply_text(t("sale_no_items", lang), reply_markup=main_menu_keyboard(lang))
+        return ConversationHandler.END
     context.user_data["sale_item"] = dict(item)
     await query.message.reply_text(
         t("sale_qty", lang, stock=item["quantity"]),
@@ -210,19 +248,55 @@ async def sale_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("invalid_number", lang))
         return SALE_PRICE
 
+    context.user_data["sale_price"] = price
+    await update.message.reply_text(t("sale_choose_date", lang), reply_markup=date_choice_keyboard())
+    return SALE_DATE
+
+
+async def finalize_sale(message, context, oid, sale_date_iso=None):
+    lang = get_lang(context)
     item = context.user_data["sale_item"]
     qty = context.user_data["sale_qty"]
+    price = context.user_data["sale_price"]
 
-    db.add_sale(item["id"], item["name"], qty, price, item["purchase_price"])
-    db.update_stock(item["id"], item["quantity"] - qty)
+    total, profit = db.add_sale(oid, item["id"], item["name"], qty, price, item["purchase_price"], sale_date_iso)
+    db.update_stock(oid, item["id"], item["quantity"] - qty)
+    db.cash_add(oid, total, note=f"Sotuv: {item['name']}")
 
-    total = qty * price
-    profit = total - (qty * item["purchase_price"])
-
-    await update.message.reply_text(
-        t("sale_done", lang, name=item["name"], qty=qty, price=price, total=total, profit=profit),
+    date_line = f"\n📅 Sana: {sale_date_iso}" if sale_date_iso else ""
+    await message.reply_text(
+        t("sale_done", lang, name=item["name"], qty=qty, price=price, total=total, profit=profit) + date_line,
         reply_markup=main_menu_keyboard(lang),
     )
+    context.user_data.pop("sale_item", None)
+    context.user_data.pop("sale_qty", None)
+    context.user_data.pop("sale_price", None)
+
+
+async def sale_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    oid = owner_id(update)
+    if query.data == "date_today":
+        await finalize_sale(query.message, context, oid, None)
+        return ConversationHandler.END
+    else:
+        await query.message.reply_text(
+            "Sanani kiriting (KK.OO.YYYY), masalan: 14.06.2026",
+            reply_markup=cancel_keyboard(get_lang(context)),
+        )
+        return SALE_DATE
+
+
+async def sale_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    parsed = parse_flexible_date(update.message.text)
+    if not parsed:
+        await update.message.reply_text(t("invalid_date_single", lang))
+        return SALE_DATE
+    await finalize_sale(update.message, context, owner_id(update), parsed.isoformat())
     return ConversationHandler.END
 
 
@@ -254,7 +328,9 @@ async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return EXPENSE_AMOUNT
 
     desc = context.user_data["expense_desc"]
-    db.add_expense(desc, amount)
+    oid = owner_id(update)
+    db.add_expense(oid, desc, amount)
+    db.cash_add(oid, -amount, note=f"Chiqim: {desc}")
     await update.message.reply_text(
         t("expense_done", lang, desc=desc, amount=amount),
         reply_markup=main_menu_keyboard(lang),
@@ -264,21 +340,37 @@ async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- KASSA ----------------
 
-async def cash_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cash_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
-    status = db.get_cash_status()
-    if status:
-        await update.message.reply_text(
-            t("cash_already_open", lang, date=status["opened_at"][:16].replace("T", " "), amount=status["opening_balance"]),
-        )
-        await update.message.reply_text(t("cash_close_amount", lang), reply_markup=cancel_keyboard(lang))
-        return CASH_CLOSE_AMOUNT
+    oid = owner_id(update)
+    balance = db.get_cash_balance(oid)
+    recent = db.get_cash_ledger(oid, limit=5)
+
+    lines = [t("cash_balance", lang, balance=fmt(balance))]
+    if recent:
+        lines.append("")
+        lines.append(t("cash_recent", lang))
+        for r in recent:
+            sign = "+" if r["amount"] >= 0 else ""
+            when = r["created_at"][:16].replace("T", " ")
+            lines.append(f"{sign}{fmt(r['amount'])} so'm — {r['note']} ({when})")
+
+    await update.message.reply_text("\n".join(lines), reply_markup=cash_actions_keyboard())
+
+
+async def cash_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = get_lang(context)
+    if query.data == "cash_in":
+        await query.message.reply_text(t("cash_in_prompt", lang), reply_markup=cancel_keyboard(lang))
+        return CASH_IN_AMOUNT
     else:
-        await update.message.reply_text(t("cash_open_amount", lang), reply_markup=cancel_keyboard(lang))
-        return CASH_OPEN_AMOUNT
+        await query.message.reply_text(t("cash_out_prompt", lang), reply_markup=cancel_keyboard(lang))
+        return CASH_OUT_AMOUNT
 
 
-async def cash_open_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cash_in_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
     if is_cancel(update.message.text, lang):
         return await cancel(update, context)
@@ -286,13 +378,13 @@ async def cash_open_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(update.message.text.replace(",", "."))
     except ValueError:
         await update.message.reply_text(t("invalid_number", lang))
-        return CASH_OPEN_AMOUNT
-    db.open_cash(amount)
-    await update.message.reply_text(t("cash_opened", lang, amount=amount), reply_markup=main_menu_keyboard(lang))
+        return CASH_IN_AMOUNT
+    db.cash_add(owner_id(update), amount, note="Qo'lda kirim")
+    await update.message.reply_text(t("cash_updated", lang), reply_markup=main_menu_keyboard(lang))
     return ConversationHandler.END
 
 
-async def cash_close_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cash_out_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(context)
     if is_cancel(update.message.text, lang):
         return await cancel(update, context)
@@ -300,9 +392,53 @@ async def cash_close_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(update.message.text.replace(",", "."))
     except ValueError:
         await update.message.reply_text(t("invalid_number", lang))
-        return CASH_CLOSE_AMOUNT
-    db.close_cash(amount)
-    await update.message.reply_text(t("cash_closed", lang, amount=amount), reply_markup=main_menu_keyboard(lang))
+        return CASH_OUT_AMOUNT
+    db.cash_add(owner_id(update), -amount, note="Qo'lda chiqim")
+    await update.message.reply_text(t("cash_updated", lang), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
+
+
+# ---------------- DOIMIY XARAJAT (IJARA / YUK) ----------------
+
+async def recurring_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    oid = owner_id(update)
+    current = db.get_recurring_costs(oid)
+    ijara = current.get("ijara", 0)
+    yuk = current.get("yuk", 0)
+    await update.message.reply_text(
+        t("recurring_current", lang, ijara=fmt(ijara), yuk=fmt(yuk)),
+        reply_markup=recurring_cost_keyboard(),
+    )
+
+
+async def recurring_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = get_lang(context)
+    category = "ijara" if query.data == "rec_ijara" else "yuk"
+    context.user_data["recurring_category"] = category
+    prompt = t("recurring_ijara_prompt", lang) if category == "ijara" else t("recurring_yuk_prompt", lang)
+    await query.message.reply_text(prompt, reply_markup=cancel_keyboard(lang))
+    return RECURRING_AMOUNT
+
+
+async def recurring_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return RECURRING_AMOUNT
+
+    category = context.user_data.get("recurring_category", "ijara")
+    db.set_recurring_cost(owner_id(update), category, amount)
+    await update.message.reply_text(
+        t("recurring_saved", lang, amount=fmt(amount)),
+        reply_markup=main_menu_keyboard(lang),
+    )
     return ConversationHandler.END
 
 
@@ -345,8 +481,15 @@ async def report_period_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
         return REPORT_CUSTOM_DATE
 
     start_iso, end_iso, label = period_range(period)
-    await send_report(query.message, context, start_iso, end_iso, label, lang)
+    await send_report(query.message, context, owner_id(update), start_iso, end_iso, label, lang)
     return ConversationHandler.END
+
+
+# Bitta sana ("14.06.2026") yoki oraliq ("14.06.2026-20.06.2026" / "14.06.2026 - 20.06.2026")
+DATE_RANGE_RE = re.compile(
+    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})"
+    r"(?:\s*-\s*(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4}))?"
+)
 
 
 async def report_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -354,7 +497,7 @@ async def report_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if is_cancel(update.message.text, lang):
         return await cancel(update, context)
 
-    match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})\s*-\s*(\d{2})\.(\d{2})\.(\d{4})", update.message.text.strip())
+    match = DATE_RANGE_RE.match(update.message.text.strip())
     if not match:
         await update.message.reply_text(t("invalid_date", lang))
         return REPORT_CUSTOM_DATE
@@ -362,18 +505,24 @@ async def report_custom_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     d1, m1, y1, d2, m2, y2 = match.groups()
     try:
         start = datetime(int(y1), int(m1), int(d1))
-        end = datetime(int(y2), int(m2), int(d2), 23, 59, 59)
+        if d2 and m2 and y2:
+            end = datetime(int(y2), int(m2), int(d2), 23, 59, 59)
+        else:
+            end = start.replace(hour=23, minute=59, second=59)
     except ValueError:
         await update.message.reply_text(t("invalid_date", lang))
         return REPORT_CUSTOM_DATE
 
+    if end < start:
+        start, end = end.replace(hour=0, minute=0, second=0), start.replace(hour=23, minute=59, second=59)
+
     label = f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}"
-    await send_report(update.message, context, start.isoformat(), end.isoformat(), label, lang)
+    await send_report(update.message, context, owner_id(update), start.isoformat(), end.isoformat(), label, lang)
     return ConversationHandler.END
 
 
-async def send_report(message, context, start_iso, end_iso, label, lang):
-    report = db.get_report(start_iso, end_iso)
+async def send_report(message, context, oid, start_iso, end_iso, label, lang):
+    report = db.get_report(oid, start_iso, end_iso)
     context.user_data["last_report"] = report
     context.user_data["last_report_label"] = label
 
@@ -381,11 +530,12 @@ async def send_report(message, context, start_iso, end_iso, label, lang):
     text = t(
         "report_text", lang,
         period=label,
-        income=f"{report['total_income']:,.0f}",
-        expenses=f"{report['total_expenses']:,.0f}",
-        gross_profit=f"{report['total_gross_profit']:,.0f}",
+        income=fmt(report["total_income"]),
+        expenses=fmt(report["total_expenses"]),
+        recurring=fmt(report["recurring_for_period"]),
+        gross_profit=fmt(report["total_gross_profit"]),
         result_label=result_label,
-        net_profit=f"{report['net_profit']:,.0f}",
+        net_profit=fmt(report["net_profit"]),
     )
     await message.reply_text(text, reply_markup=main_menu_keyboard(lang))
 
@@ -443,7 +593,8 @@ async def send_ai_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import requests
         prompt = (
             f"Do'kon hisoboti: kirim {report['total_income']:.0f} so'm, "
-            f"chiqim {report['total_expenses']:.0f} so'm, "
+            f"chiqim {report['total_expenses_all']:.0f} so'm (shundan doimiy xarajat ulushi "
+            f"{report['recurring_for_period']:.0f} so'm), "
             f"sof foyda/zarar {report['net_profit']:.0f} so'm. "
             f"Sotuvlar soni: {len(report['sales'])}. "
             "Shu ma'lumotlar asosida qisqa (5-6 gapli) tahlil va tavsiya yozib ber, o'zbek tilida."
@@ -504,9 +655,13 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
 
-    # Ombor
+    # Ombor ro'yxati va PDF
+    app.add_handler(MessageHandler(filters.Regex("^📦 Ombor$"), ombor_list_show))
+    app.add_handler(MessageHandler(filters.Regex("^📄 Ombor PDF$"), ombor_pdf))
+
+    # Mahsulot qo'shish
     app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📦 Ombor$"), ombor_start)],
+        entry_points=[MessageHandler(filters.Regex("^➕ Mahsulot qo'shish$"), ombor_start)],
         states={
             OMBOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_name)],
             OMBOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_price)],
@@ -514,15 +669,18 @@ def main():
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
-    app.add_handler(MessageHandler(filters.Regex("^📋 Ro'yxat$"), ombor_list_show))
 
-    # Sotish
+    # Sotish (mahsulot -> son -> narx -> sana)
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💰 Sotish$"), sale_start)],
         states={
             SALE_ITEM: [CallbackQueryHandler(sale_item_chosen, pattern="^item_")],
             SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
             SALE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_price)],
+            SALE_DATE: [
+                CallbackQueryHandler(sale_date_callback, pattern="^date_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, sale_date_text),
+            ],
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
@@ -538,11 +696,22 @@ def main():
     ))
 
     # Kassa
+    app.add_handler(MessageHandler(filters.Regex("^💵 Kassa$"), cash_show))
     app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💵 Kassa$"), cash_start)],
+        entry_points=[CallbackQueryHandler(cash_action_callback, pattern="^cash_")],
         states={
-            CASH_OPEN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_open_amount)],
-            CASH_CLOSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_close_amount)],
+            CASH_IN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_in_amount)],
+            CASH_OUT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_out_amount)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
+    # Doimiy xarajat (ijara / yuk)
+    app.add_handler(MessageHandler(filters.Regex("^⚙️ Doimiy xarajat$"), recurring_start))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(recurring_category_callback, pattern="^rec_")],
+        states={
+            RECURRING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, recurring_amount)],
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))

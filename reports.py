@@ -147,6 +147,46 @@ def generate_pdf(report, period_label, filepath=None):
     return filepath
 
 
+def generate_items_pdf(items, filepath=None):
+    """Ombordagi mahsulotlar ro'yxatini PDF fayl sifatida yaratadi."""
+    if filepath is None:
+        filepath = os.path.join(OUTPUT_DIR, "ombor.pdf")
+
+    doc = SimpleDocTemplate(filepath, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph("<b>Ombordagi mahsulotlar</b>", styles["Title"]))
+    elements.append(Spacer(1, 12))
+
+    data = [["Mahsulot", "Qoldiq", "Birlik", "Tannarx (so'm)", "Jami qiymat (so'm)"]]
+    total_value = 0
+    for item in items:
+        value = item["quantity"] * item["purchase_price"]
+        total_value += value
+        data.append([
+            item["name"],
+            f"{item['quantity']:,.0f}".replace(",", " "),
+            item["unit"],
+            f"{item['purchase_price']:,.0f}".replace(",", " "),
+            f"{value:,.0f}".replace(",", " "),
+        ])
+    data.append(["", "", "", "Jami:", f"{total_value:,.0f}".replace(",", " ")])
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+    ]))
+    elements.append(table)
+
+    doc.build(elements)
+    return filepath
+
+
 def generate_chart(report, period_label, filepath=None):
     """Kunlar bo'yicha foyda/zarar ustunli diagrammasini yaratadi."""
     if filepath is None:

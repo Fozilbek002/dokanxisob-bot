@@ -25,6 +25,7 @@ TEXTS = {
         "sale_qty": "Necha dona sotildi? (omborda: {stock})",
         "sale_not_enough": "❗ Omborda yetarli emas! Omborda: {stock}",
         "sale_price": "Sotish narxini kiriting (so'm):",
+        "sale_choose_date": "Bu sotuv qaysi sanaga tegishli?",
         "sale_done": "✅ Sotildi: {name} — {qty} dona x {price} so'm = {total} so'm\nFoyda: {profit} so'm",
         # Chiqim
         "expense_desc": "Chiqim izohini kiriting (masalan: ijara, transport):",
@@ -44,11 +45,12 @@ TEXTS = {
         "report_monthly": "📅 Oylik",
         "report_yearly": "📅 Yillik",
         "report_custom": "📅 Sana tanlash",
-        "report_custom_prompt": "Sanani kiriting (KUN.OY.YIL - KUN.OY.YIL), masalan: 01.08.2026-06.08.2026",
+        "report_custom_prompt": "Sanani kiriting.\nBir kunlik: 14.06.2026\nOraliq: 14.06.2026-20.06.2026\n(1 kundan 1 yilgacha istalgan oraliqni kiritishingiz mumkin)",
         "report_text": (
             "📊 Hisobot ({period})\n\n"
             "💰 Kirim (sotuvlar): {income} so'm\n"
-            "💸 Chiqim: {expenses} so'm\n"
+            "💸 Chiqim (qo'lda kiritilgan): {expenses} so'm\n"
+            "🏠 Ijara/yuk (kunlik ulush): {recurring} so'm\n"
             "📦 Sotuvlardan sof foyda: {gross_profit} so'm\n\n"
             "{result_label}: {net_profit} so'm"
         ),
@@ -59,10 +61,23 @@ TEXTS = {
         "pdf_ready": "📄 PDF hisobot tayyor.",
         "excel_ready": "📊 Excel hisobot tayyor.",
         "chart_ready": "📈 Grafik tayyor.",
+        "ombor_pdf_ready": "📄 Ombor ro'yxati PDF tayyor.",
         "ai_analyzing": "🤖 AI tahlil qilmoqda...",
         "ai_no_key": "🤖 AI tahlili uchun ANTHROPIC_API_KEY sozlanmagan. bot.py faylida sozlang.",
         "invalid_number": "❗ Iltimos, to'g'ri son kiriting.",
-        "invalid_date": "❗ Sana formati noto'g'ri. Masalan: 01.08.2026-06.08.2026",
+        "invalid_date": "❗ Sana formati noto'g'ri. Masalan: 14.06.2026 yoki 14.06.2026-20.06.2026",
+        "invalid_date_single": "❗ Sana formati noto'g'ri. Masalan: 14.06.2026",
+        # Kassa
+        "cash_balance": "💰 Kassadagi joriy summa: {balance} so'm",
+        "cash_recent": "Oxirgi harakatlar:",
+        "cash_in_prompt": "Kassaga qo'shiladigan summani kiriting (so'm):",
+        "cash_out_prompt": "Kassadan olinadigan summani kiriting (so'm):",
+        "cash_updated": "✅ Kassa yangilandi.",
+        # Doimiy xarajat
+        "recurring_current": "⚙️ Joriy doimiy xarajatlar (oylik):\n🏠 Ijara: {ijara} so'm\n🚚 Yuk tashish: {yuk} so'm\n\nO'zgartirish uchun tanlang:",
+        "recurring_ijara_prompt": "Oylik ijara summasini kiriting (so'm):",
+        "recurring_yuk_prompt": "Oylik yuk tashish (tovar olib kelish) summasini kiriting (so'm):",
+        "recurring_saved": "✅ Saqlandi: {amount} so'm/oy. Bu summa kunlik hisobotlarda avtomatik bo'lib hisoblanadi.",
     },
 
     "uz_cyrillic": {
