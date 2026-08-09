@@ -41,6 +41,7 @@ from keyboards import (
     main_menu_keyboard,
     cancel_keyboard,
     items_inline_keyboard,
+    items_delete_inline_keyboard,
     date_choice_keyboard,
     cash_actions_keyboard,
     recurring_cost_keyboard,
@@ -116,12 +117,29 @@ async def ombor_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("ombor_list_empty", lang))
         return
     lines = [t("ombor_list_header", lang), ""]
+    grand_total = 0
     for item in items:
+        line_total = item["quantity"] * item["purchase_price"]
+        grand_total += line_total
         lines.append(
             f"• {item['name']} — {fmt(item['quantity'])} {item['unit']}, "
-            f"tannarx: {fmt(item['purchase_price'])} so'm"
+            f"tannarx: {fmt(item['purchase_price'])} so'm/{item['unit']}, "
+            f"jami: {fmt(line_total)} so'm"
         )
-    await update.message.reply_text("\n".join(lines))
+    lines.append("")
+    lines.append(f"💰 <b>Ombordagi umumiy qiymat: {fmt(grand_total)} so'm</b>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        t("ombor_delete_hint", lang), reply_markup=items_delete_inline_keyboard(items)
+    )
+
+
+async def ombor_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = int(query.data.split("_")[1])
+    db.delete_item(owner_id(update), item_id)
+    await query.message.reply_text(t("ombor_deleted", get_lang(context)))
 
 
 async def ombor_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -658,6 +676,7 @@ def main():
     # Ombor ro'yxati va PDF
     app.add_handler(MessageHandler(filters.Regex("^📦 Ombor$"), ombor_list_show))
     app.add_handler(MessageHandler(filters.Regex("^📄 Ombor PDF$"), ombor_pdf))
+    app.add_handler(CallbackQueryHandler(ombor_delete_callback, pattern="^delitem_"))
 
     # Mahsulot qo'shish
     app.add_handler(ConversationHandler(

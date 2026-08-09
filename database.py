@@ -127,6 +127,15 @@ def update_stock(owner_id, item_id, new_quantity):
     conn.close()
 
 
+def delete_item(owner_id, item_id):
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM items WHERE id = ? AND owner_id = ?", (item_id, owner_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 # ---------------- SOTISH (SALES) ----------------
 
 def add_sale(owner_id, item_id, item_name, quantity, sale_price, purchase_price, sale_date=None):

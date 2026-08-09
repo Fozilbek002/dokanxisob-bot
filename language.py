@@ -19,6 +19,8 @@ TEXTS = {
         "ombor_added": "✅ '{name}' omborga qo'shildi: {qty} dona, tannarx {price} so'm.",
         "ombor_list_header": "📦 Ombordagi mahsulotlar:",
         "ombor_list_empty": "Omborda hozircha mahsulot yo'q. \"📦 Ombor\" tugmasi orqali qo'shing.",
+        "ombor_delete_hint": "Mahsulotni o'chirish uchun tugmani bosing:",
+        "ombor_deleted": "🗑 Mahsulot omborddan o'chirildi.",
         # Sotish
         "sale_choose_item": "Qaysi mahsulotni sotasiz?",
         "sale_no_items": "Omborda mahsulot yo'q. Avval /ombor orqali mahsulot qo'shing.",

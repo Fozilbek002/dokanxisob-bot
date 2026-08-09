@@ -36,6 +36,19 @@ def items_inline_keyboard(items):
     return InlineKeyboardMarkup(buttons)
 
 
+def items_delete_inline_keyboard(items):
+    """Har bir mahsulotni o'chirish uchun tugmalar."""
+    buttons = []
+    for item in items:
+        buttons.append([
+            InlineKeyboardButton(
+                f"🗑 {item['name']} o'chirish",
+                callback_data=f"delitem_{item['id']}",
+            )
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
 def date_choice_keyboard():
     buttons = [
         [InlineKeyboardButton("📆 Bugun", callback_data="date_today")],
