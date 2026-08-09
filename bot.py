@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
     REPORT_CUSTOM_DATE,
     EXPENSE_EDIT_AMOUNT,
     SALE_EDIT_QTY, SALE_EDIT_PRICE,
-) = range(16)
+) = range(17)
 
 
 def get_lang(context):
