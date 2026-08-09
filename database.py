@@ -69,9 +69,17 @@ def init_db():
             owner_id INTEGER NOT NULL,
             amount REAL NOT NULL,
             note TEXT,
+            ref_type TEXT,
+            ref_id INTEGER,
             created_at TEXT NOT NULL
         )
     """)
+    # Eski bazalarda ref_type/ref_id ustunlari bo'lmasligi mumkin — qo'shamiz
+    existing_cols = [r["name"] for r in cur.execute("PRAGMA table_info(cash_ledger)").fetchall()]
+    if "ref_type" not in existing_cols:
+        cur.execute("ALTER TABLE cash_ledger ADD COLUMN ref_type TEXT")
+    if "ref_id" not in existing_cols:
+        cur.execute("ALTER TABLE cash_ledger ADD COLUMN ref_id INTEGER")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS recurring_costs (
@@ -145,15 +153,16 @@ def add_sale(owner_id, item_id, item_name, quantity, sale_price, purchase_price,
     created_at = f"{sale_date}T12:00:00" if sale_date else datetime.now().isoformat()
 
     conn = get_conn()
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO sales
            (owner_id, item_id, item_name, quantity, sale_price, purchase_price, total, profit, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (owner_id, item_id, item_name, quantity, sale_price, purchase_price, total, profit, created_at),
     )
+    sale_id = cur.lastrowid
     conn.commit()
     conn.close()
-    return total, profit
+    return sale_id, total, profit
 
 
 def get_sales(owner_id, start_iso, end_iso):
@@ -166,16 +175,79 @@ def get_sales(owner_id, start_iso, end_iso):
     return rows
 
 
+def get_recent_sales(owner_id, limit=10):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM sales WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
+        (owner_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_sale(owner_id, sale_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM sales WHERE id = ? AND owner_id = ?", (sale_id, owner_id)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def delete_sale(owner_id, sale_id):
+    """Sotuvni bekor qiladi: mahsulotni omborga qaytaradi, kassadagi yozuvni o'chiradi."""
+    sale = get_sale(owner_id, sale_id)
+    if not sale:
+        return False
+    conn = get_conn()
+    conn.execute(
+        "UPDATE items SET quantity = quantity + ? WHERE id = ? AND owner_id = ?",
+        (sale["quantity"], sale["item_id"], owner_id),
+    )
+    conn.execute("DELETE FROM sales WHERE id = ? AND owner_id = ?", (sale_id, owner_id))
+    conn.commit()
+    conn.close()
+    cash_remove_ref(owner_id, "sale", sale_id)
+    return True
+
+
+def update_sale(owner_id, sale_id, new_quantity, new_sale_price):
+    """Sotuvni tahrirlaydi: ombor qoldig'ini va kassani to'g'irlaydi."""
+    sale = get_sale(owner_id, sale_id)
+    if not sale:
+        return False
+    qty_diff = new_quantity - sale["quantity"]
+    new_total = new_quantity * new_sale_price
+    new_profit = new_total - (new_quantity * sale["purchase_price"])
+
+    conn = get_conn()
+    conn.execute(
+        "UPDATE items SET quantity = quantity - ? WHERE id = ? AND owner_id = ?",
+        (qty_diff, sale["item_id"], owner_id),
+    )
+    conn.execute(
+        "UPDATE sales SET quantity = ?, sale_price = ?, total = ?, profit = ? WHERE id = ? AND owner_id = ?",
+        (new_quantity, new_sale_price, new_total, new_profit, sale_id, owner_id),
+    )
+    conn.commit()
+    conn.close()
+    cash_remove_ref(owner_id, "sale", sale_id)
+    cash_add(owner_id, new_total, note=f"Sotuv (tahrirlangan): {sale['item_name']}", ref_type="sale", ref_id=sale_id)
+    return True
+
+
 # ---------------- CHIQIM (EXPENSES) ----------------
 
 def add_expense(owner_id, description, amount):
     conn = get_conn()
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO expenses (owner_id, description, amount, created_at) VALUES (?, ?, ?, ?)",
         (owner_id, description, amount, datetime.now().isoformat()),
     )
+    expense_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return expense_id
 
 
 def get_expenses(owner_id, start_iso, end_iso):
@@ -188,14 +260,69 @@ def get_expenses(owner_id, start_iso, end_iso):
     return rows
 
 
+def get_recent_expenses(owner_id, limit=10):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM expenses WHERE owner_id = ? ORDER BY id DESC LIMIT ?",
+        (owner_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_expense(owner_id, expense_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM expenses WHERE id = ? AND owner_id = ?", (expense_id, owner_id)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def delete_expense(owner_id, expense_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM expenses WHERE id = ? AND owner_id = ?", (expense_id, owner_id))
+    conn.commit()
+    conn.close()
+    cash_remove_ref(owner_id, "expense", expense_id)
+
+
+def update_expense(owner_id, expense_id, new_amount):
+    expense = get_expense(owner_id, expense_id)
+    if not expense:
+        return False
+    conn = get_conn()
+    conn.execute(
+        "UPDATE expenses SET amount = ? WHERE id = ? AND owner_id = ?",
+        (new_amount, expense_id, owner_id),
+    )
+    conn.commit()
+    conn.close()
+    cash_remove_ref(owner_id, "expense", expense_id)
+    cash_add(owner_id, -new_amount, note=f"Chiqim (tahrirlangan): {expense['description']}",
+              ref_type="expense", ref_id=expense_id)
+    return True
+
+
 # ---------------- KASSA (CASH LEDGER) ----------------
 
-def cash_add(owner_id, amount, note=""):
+def cash_add(owner_id, amount, note="", ref_type=None, ref_id=None):
     """Kassaga kirim (+) yoki chiqim (-) yozadi."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO cash_ledger (owner_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
-        (owner_id, amount, note, datetime.now().isoformat()),
+        "INSERT INTO cash_ledger (owner_id, amount, note, ref_type, ref_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (owner_id, amount, note, ref_type, ref_id, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def cash_remove_ref(owner_id, ref_type, ref_id):
+    """Berilgan sotuv/chiqimga tegishli kassa yozuvlarini o'chiradi (bekor qilish uchun)."""
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM cash_ledger WHERE owner_id = ? AND ref_type = ? AND ref_id = ?",
+        (owner_id, ref_type, ref_id),
     )
     conn.commit()
     conn.close()

@@ -40,8 +40,11 @@ from language import t
 from keyboards import (
     main_menu_keyboard,
     cancel_keyboard,
+    unit_choice_keyboard,
     items_inline_keyboard,
     items_delete_inline_keyboard,
+    sales_inline_keyboard,
+    expenses_inline_keyboard,
     date_choice_keyboard,
     cash_actions_keyboard,
     recurring_cost_keyboard,
@@ -59,13 +62,15 @@ logger = logging.getLogger(__name__)
 
 # ---- CONVERSATION STATES ----
 (
-    OMBOR_NAME, OMBOR_PRICE, OMBOR_QTY,
+    OMBOR_NAME, OMBOR_UNIT, OMBOR_PRICE, OMBOR_QTY,
     SALE_ITEM, SALE_QTY, SALE_PRICE, SALE_DATE,
     EXPENSE_DESC, EXPENSE_AMOUNT,
     CASH_IN_AMOUNT, CASH_OUT_AMOUNT,
     RECURRING_AMOUNT,
     REPORT_CUSTOM_DATE,
-) = range(13)
+    EXPENSE_EDIT_AMOUNT,
+    SALE_EDIT_QTY, SALE_EDIT_PRICE,
+) = range(16)
 
 
 def get_lang(context):
@@ -129,6 +134,14 @@ async def ombor_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append(f"💰 <b>Ombordagi umumiy qiymat: {fmt(grand_total)} so'm</b>")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def ombor_delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    items = db.get_items(owner_id(update))
+    if not items:
+        await update.message.reply_text(t("ombor_list_empty", lang))
+        return
     await update.message.reply_text(
         t("ombor_delete_hint", lang), reply_markup=items_delete_inline_keyboard(items)
     )
@@ -167,7 +180,27 @@ async def ombor_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_cancel(update.message.text, lang):
         return await cancel(update, context)
     context.user_data["new_item_name"] = update.message.text.strip()
-    await update.message.reply_text(t("ombor_price", lang))
+    await update.message.reply_text(t("ombor_unit", lang), reply_markup=unit_choice_keyboard(lang))
+    return OMBOR_UNIT
+
+
+async def ombor_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    unit_raw = update.message.text.strip()
+    unit_map = {
+        "📦 Dona": "dona", "📦 Штук": "dona", "📦 Piece": "dona", "📦 Дона": "dona",
+        "⚖️ Kg": "kg", "⚖️ Кг": "kg",
+        "🧴 Litr": "litr", "🧴 Литр": "litr", "🧴 Liter": "litr",
+        "📏 Metr": "metr", "📏 Метр": "metr", "📏 Meter": "metr",
+    }
+    unit = unit_map.get(unit_raw)
+    if not unit:
+        await update.message.reply_text(t("ombor_unit_invalid", lang), reply_markup=unit_choice_keyboard(lang))
+        return OMBOR_UNIT
+    context.user_data["new_item_unit"] = unit
+    await update.message.reply_text(t("ombor_price", lang, unit=unit), reply_markup=cancel_keyboard(lang))
     return OMBOR_PRICE
 
 
@@ -181,7 +214,8 @@ async def ombor_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("invalid_number", lang))
         return OMBOR_PRICE
     context.user_data["new_item_price"] = price
-    await update.message.reply_text(t("ombor_qty", lang))
+    unit = context.user_data["new_item_unit"]
+    await update.message.reply_text(t("ombor_qty", lang, unit=unit))
     return OMBOR_QTY
 
 
@@ -197,10 +231,12 @@ async def ombor_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = context.user_data["new_item_name"]
     price = context.user_data["new_item_price"]
-    db.add_item(owner_id(update), name, price, qty)
+    unit = context.user_data["new_item_unit"]
+    total_cost = price * qty
+    db.add_item(owner_id(update), name, price, qty, unit)
 
     await update.message.reply_text(
-        t("ombor_added", lang, name=name, qty=qty, price=price),
+        t("ombor_added", lang, name=name, qty=fmt(qty), unit=unit, price=fmt(price), total=fmt(total_cost)),
         reply_markup=main_menu_keyboard(lang),
     )
     return ConversationHandler.END
@@ -277,9 +313,9 @@ async def finalize_sale(message, context, oid, sale_date_iso=None):
     qty = context.user_data["sale_qty"]
     price = context.user_data["sale_price"]
 
-    total, profit = db.add_sale(oid, item["id"], item["name"], qty, price, item["purchase_price"], sale_date_iso)
+    sale_id, total, profit = db.add_sale(oid, item["id"], item["name"], qty, price, item["purchase_price"], sale_date_iso)
     db.update_stock(oid, item["id"], item["quantity"] - qty)
-    db.cash_add(oid, total, note=f"Sotuv: {item['name']}")
+    db.cash_add(oid, total, note=f"Sotuv: {item['name']}", ref_type="sale", ref_id=sale_id)
 
     date_line = f"\n📅 Sana: {sale_date_iso}" if sale_date_iso else ""
     await message.reply_text(
@@ -318,6 +354,83 @@ async def sale_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ---------------- SOTUVLARNI BOSHQARISH (RO'YXAT / TAHRIRLASH / O'CHIRISH) ----------------
+
+async def sales_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    oid = owner_id(update)
+    sales = db.get_recent_sales(oid, limit=10)
+    if not sales:
+        await update.message.reply_text(t("sale_list_empty", lang))
+        return
+    await update.message.reply_text(
+        t("sale_list_header", lang), reply_markup=sales_inline_keyboard(sales), parse_mode="HTML"
+    )
+
+
+async def sale_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, action, sale_id = query.data.split("_")
+    sale_id = int(sale_id)
+    oid = owner_id(update)
+    lang = get_lang(context)
+
+    if action == "del":
+        ok = db.delete_sale(oid, sale_id)
+        await query.message.reply_text(t("sale_deleted", lang) if ok else t("sale_not_found", lang))
+    elif action == "edit":
+        sale = db.get_sale(oid, sale_id)
+        if not sale:
+            await query.message.reply_text(t("sale_not_found", lang))
+            return
+        context.user_data["edit_sale_id"] = sale_id
+        context.user_data["edit_sale_item_id"] = sale["item_id"]
+        context.user_data["edit_sale_purchase_price"] = sale["purchase_price"]
+        await query.message.reply_text(
+            t("sale_edit_qty_prompt", lang, name=sale["item_name"]), reply_markup=cancel_keyboard(lang)
+        )
+        return SALE_EDIT_QTY
+
+
+async def sale_edit_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        qty = float(update.message.text.replace(",", "."))
+        if qty <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return SALE_EDIT_QTY
+    context.user_data["edit_sale_qty"] = qty
+    await update.message.reply_text(t("sale_edit_price_prompt", lang))
+    return SALE_EDIT_PRICE
+
+
+async def sale_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        price = float(update.message.text.replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return SALE_EDIT_PRICE
+
+    sale_id = context.user_data.pop("edit_sale_id")
+    qty = context.user_data.pop("edit_sale_qty")
+    context.user_data.pop("edit_sale_item_id", None)
+    context.user_data.pop("edit_sale_purchase_price", None)
+
+    db.update_sale(owner_id(update), sale_id, qty, price)
+    await update.message.reply_text(t("sale_edited", lang), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
+
+
 # ---------------- CHIQIM ----------------
 
 async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,12 +460,59 @@ async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     desc = context.user_data["expense_desc"]
     oid = owner_id(update)
-    db.add_expense(oid, desc, amount)
-    db.cash_add(oid, -amount, note=f"Chiqim: {desc}")
+    expense_id = db.add_expense(oid, desc, amount)
+    db.cash_add(oid, -amount, note=f"Chiqim: {desc}", ref_type="expense", ref_id=expense_id)
     await update.message.reply_text(
         t("expense_done", lang, desc=desc, amount=amount),
         reply_markup=main_menu_keyboard(lang),
     )
+    return ConversationHandler.END
+
+
+# ---------------- CHIQIMLARNI BOSHQARISH (RO'YXAT / TAHRIRLASH / O'CHIRISH) ----------------
+
+async def expenses_list_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    oid = owner_id(update)
+    expenses = db.get_recent_expenses(oid, limit=10)
+    if not expenses:
+        await update.message.reply_text(t("expense_list_empty", lang))
+        return
+    await update.message.reply_text(
+        t("expense_list_header", lang), reply_markup=expenses_inline_keyboard(expenses), parse_mode="HTML"
+    )
+
+
+async def expense_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, action, expense_id = query.data.split("_")
+    expense_id = int(expense_id)
+    oid = owner_id(update)
+    lang = get_lang(context)
+
+    if action == "del":
+        db.delete_expense(oid, expense_id)
+        await query.message.reply_text(t("expense_deleted", lang))
+    elif action == "edit":
+        context.user_data["edit_expense_id"] = expense_id
+        await query.message.reply_text(t("expense_edit_prompt", lang), reply_markup=cancel_keyboard(lang))
+        return EXPENSE_EDIT_AMOUNT
+
+
+async def expense_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    if is_cancel(update.message.text, lang):
+        return await cancel(update, context)
+    try:
+        new_amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(t("invalid_number", lang))
+        return EXPENSE_EDIT_AMOUNT
+
+    expense_id = context.user_data.pop("edit_expense_id")
+    db.update_expense(owner_id(update), expense_id, new_amount)
+    await update.message.reply_text(t("expense_edited", lang), reply_markup=main_menu_keyboard(lang))
     return ConversationHandler.END
 
 
@@ -661,6 +821,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Faqat ma'lumot ko'rsatuvchi tugmalar uchun (hech narsa qilmaydi)."""
+    await update.callback_query.answer()
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Xatolik:", exc_info=context.error)
 
@@ -675,6 +840,7 @@ def main():
 
     # Ombor ro'yxati va PDF
     app.add_handler(MessageHandler(filters.Regex("^📦 Ombor$"), ombor_list_show))
+    app.add_handler(MessageHandler(filters.Regex("^🗑 Mahsulot o'chirish$"), ombor_delete_menu))
     app.add_handler(MessageHandler(filters.Regex("^📄 Ombor PDF$"), ombor_pdf))
     app.add_handler(CallbackQueryHandler(ombor_delete_callback, pattern="^delitem_"))
 
@@ -683,6 +849,7 @@ def main():
         entry_points=[MessageHandler(filters.Regex("^➕ Mahsulot qo'shish$"), ombor_start)],
         states={
             OMBOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_name)],
+            OMBOR_UNIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_unit)],
             OMBOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_price)],
             OMBOR_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_qty)],
         },
@@ -704,6 +871,17 @@ def main():
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
 
+    # Sotuvlar tarixi, tahrirlash va o'chirish
+    app.add_handler(MessageHandler(filters.Regex("^📜 Sotuvlar tarixi$"), sales_list_show))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(sale_action_callback, pattern="^sale_(edit|del)_")],
+        states={
+            SALE_EDIT_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_edit_qty)],
+            SALE_EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_edit_price)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+
     # Chiqim
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💸 Chiqim$"), expense_start)],
@@ -713,6 +891,17 @@ def main():
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
+
+    # Chiqimlar tarixi, tahrirlash va o'chirish
+    app.add_handler(MessageHandler(filters.Regex("^📜 Chiqimlar tarixi$"), expenses_list_show))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(expense_action_callback, pattern="^exp_(edit|del)_")],
+        states={
+            EXPENSE_EDIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_edit_amount)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+    ))
+    app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop$"))
 
     # Kassa
     app.add_handler(MessageHandler(filters.Regex("^💵 Kassa$"), cash_show))
