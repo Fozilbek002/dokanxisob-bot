@@ -34,6 +34,15 @@ def unit_choice_keyboard(lang="uz_latin"):
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
+def transport_choice_keyboard(lang="uz_latin"):
+    """Shu partiya uchun transport xarajati bor-yo'qligini tanlash."""
+    buttons = [
+        [t("no_transport", lang)],
+        [t("cancel", lang)],
+    ]
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+
+
 def items_inline_keyboard(items):
     """Ombordagi mahsulotlar ro'yxatidan tanlash uchun inline tugmalar."""
     buttons = []
@@ -105,7 +114,6 @@ def cash_actions_keyboard():
 def recurring_cost_keyboard():
     buttons = [
         [InlineKeyboardButton("🏠 Ijara", callback_data="rec_ijara")],
-        [InlineKeyboardButton("🚚 Yuk tashish", callback_data="rec_yuk")],
     ]
     return InlineKeyboardMarkup(buttons)
 

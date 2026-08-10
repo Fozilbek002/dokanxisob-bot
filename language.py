@@ -19,6 +19,9 @@ TEXTS = {
         "ombor_price": "1 {unit} kelish (tannarx) narxini kiriting (so'm):",
         "ombor_qty": "Nechta/necha {unit} oldingiz?",
         "ombor_added": "✅ '{name}' omborga qo'shildi: {qty} {unit} x {price} so'm = jami {total} so'm.",
+        "ombor_transport_prompt": "Shu yukka (partiyaga) transport/yuk tashish xarajati bo'ldimi? Bo'lsa summasini kiriting (so'm), bo'lmasa \"Yo'q\" tugmasini bosing:",
+        "no_transport": "🚫 Yo'q",
+        "ombor_transport_summary": "\n🚚 Yuk xarajati: {transport} so'm ({per_unit} so'm/{unit} qo'shildi, tannarxga kiritildi)",
         "ombor_list_header": "📦 Ombordagi mahsulotlar:",
         "ombor_list_empty": "Omborda hozircha mahsulot yo'q. \"📦 Ombor\" tugmasi orqali qo'shing.",
         "ombor_delete_hint": "Mahsulotni o'chirish uchun tugmani bosing:",
@@ -66,7 +69,7 @@ TEXTS = {
             "📊 Hisobot ({period})\n\n"
             "💰 Kirim (sotuvlar): {income} so'm\n"
             "💸 Chiqim (qo'lda kiritilgan): {expenses} so'm\n"
-            "🏠 Ijara/yuk (kunlik ulush): {recurring} so'm\n"
+            "🏠 Ijara (kunlik ulush): {recurring} so'm\n"
             "📦 Sotuvlardan sof foyda: {gross_profit} so'm\n\n"
             "{result_label}: {net_profit} so'm"
         ),
@@ -90,9 +93,8 @@ TEXTS = {
         "cash_out_prompt": "Kassadan olinadigan summani kiriting (so'm):",
         "cash_updated": "✅ Kassa yangilandi.",
         # Doimiy xarajat
-        "recurring_current": "⚙️ Joriy doimiy xarajatlar (oylik):\n🏠 Ijara: {ijara} so'm\n🚚 Yuk tashish: {yuk} so'm\n\nO'zgartirish uchun tanlang:",
+        "recurring_current": "⚙️ Joriy oylik ijara: {ijara} so'm\n\nO'zgartirish uchun tanlang:",
         "recurring_ijara_prompt": "Oylik ijara summasini kiriting (so'm):",
-        "recurring_yuk_prompt": "Oylik yuk tashish (tovar olib kelish) summasini kiriting (so'm):",
         "recurring_saved": "✅ Saqlandi: {amount} so'm/oy. Bu summa kunlik hisobotlarda avtomatik bo'lib hisoblanadi.",
     },
 

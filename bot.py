@@ -8,7 +8,8 @@ Imkoniyatlar:
     💰 Sotish             — mahsulot sotish (sana tanlash bilan), kassaga avtomatik kirim
     💸 Chiqim             — xarajatlarni yozib borish
     💵 Kassa              — joriy kassa balansini ko'rish, qo'lda kirim/chiqim
-    ⚙️ Doimiy xarajat     — ijara va yuk tashish oylik summasi (kunlik hisobotga bo'linadi)
+    ⚙️ Doimiy xarajat     — ijara oylik summasi (kunlik hisobotga bo'linadi)
+    🚚 Yuk xarajati       — mahsulot qo'shishda kiritiladi, shu partiya miqdoriga bo'linib tannarxga qo'shiladi
     📊 Hisobot            — kunlik / haftalik / oylik / yillik / erkin sana oralig'i
     📄 Ombor PDF          — ombordagi mahsulotlar ro'yxati PDF shaklida
     📄 PDF / 📊 Excel / 📈 Grafiklar — hisobot fayllari
@@ -41,6 +42,7 @@ from keyboards import (
     main_menu_keyboard,
     cancel_keyboard,
     unit_choice_keyboard,
+    transport_choice_keyboard,
     items_inline_keyboard,
     items_delete_inline_keyboard,
     sales_inline_keyboard,
@@ -62,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 # ---- CONVERSATION STATES ----
 (
-    OMBOR_NAME, OMBOR_UNIT, OMBOR_PRICE, OMBOR_QTY,
+    OMBOR_NAME, OMBOR_UNIT, OMBOR_PRICE, OMBOR_QTY, OMBOR_TRANSPORT,
     SALE_ITEM, SALE_QTY, SALE_PRICE, SALE_DATE,
     EXPENSE_DESC, EXPENSE_AMOUNT,
     CASH_IN_AMOUNT, CASH_OUT_AMOUNT,
@@ -70,7 +72,7 @@ logger = logging.getLogger(__name__)
     REPORT_CUSTOM_DATE,
     EXPENSE_EDIT_AMOUNT,
     SALE_EDIT_QTY, SALE_EDIT_PRICE,
-) = range(17)
+) = range(18)
 
 
 def get_lang(context):
@@ -229,14 +231,53 @@ async def ombor_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("invalid_number", lang))
         return OMBOR_QTY
 
-    name = context.user_data["new_item_name"]
-    price = context.user_data["new_item_price"]
+    context.user_data["new_item_qty"] = qty
     unit = context.user_data["new_item_unit"]
-    total_cost = price * qty
-    db.add_item(owner_id(update), name, price, qty, unit)
+    await update.message.reply_text(
+        t("ombor_transport_prompt", lang, unit=unit), reply_markup=transport_choice_keyboard(lang)
+    )
+    return OMBOR_TRANSPORT
+
+
+async def ombor_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    text = update.message.text.strip()
+    if is_cancel(text, lang):
+        return await cancel(update, context)
+
+    name = context.user_data["new_item_name"]
+    base_price = context.user_data["new_item_price"]
+    qty = context.user_data["new_item_qty"]
+    unit = context.user_data["new_item_unit"]
+
+    if text == t("no_transport", lang):
+        transport_amount = 0.0
+    else:
+        try:
+            transport_amount = float(text.replace(",", "."))
+        except ValueError:
+            await update.message.reply_text(
+                t("invalid_number", lang), reply_markup=transport_choice_keyboard(lang)
+            )
+            return OMBOR_TRANSPORT
+
+    transport_per_unit = (transport_amount / qty) if qty > 0 else 0.0
+    final_price = base_price + transport_per_unit
+    total_cost = final_price * qty
+
+    db.add_item(owner_id(update), name, final_price, qty, unit)
+
+    if transport_amount > 0:
+        extra = t(
+            "ombor_transport_summary", lang,
+            transport=fmt(transport_amount), per_unit=fmt(transport_per_unit), unit=unit,
+        )
+    else:
+        extra = ""
 
     await update.message.reply_text(
-        t("ombor_added", lang, name=name, qty=fmt(qty), unit=unit, price=fmt(price), total=fmt(total_cost)),
+        t("ombor_added", lang, name=name, qty=fmt(qty), unit=unit, price=fmt(final_price), total=fmt(total_cost))
+        + extra,
         reply_markup=main_menu_keyboard(lang),
     )
     return ConversationHandler.END
@@ -583,9 +624,8 @@ async def recurring_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     oid = owner_id(update)
     current = db.get_recurring_costs(oid)
     ijara = current.get("ijara", 0)
-    yuk = current.get("yuk", 0)
     await update.message.reply_text(
-        t("recurring_current", lang, ijara=fmt(ijara), yuk=fmt(yuk)),
+        t("recurring_current", lang, ijara=fmt(ijara)),
         reply_markup=recurring_cost_keyboard(),
     )
 
@@ -594,10 +634,8 @@ async def recurring_category_callback(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     await query.answer()
     lang = get_lang(context)
-    category = "ijara" if query.data == "rec_ijara" else "yuk"
-    context.user_data["recurring_category"] = category
-    prompt = t("recurring_ijara_prompt", lang) if category == "ijara" else t("recurring_yuk_prompt", lang)
-    await query.message.reply_text(prompt, reply_markup=cancel_keyboard(lang))
+    context.user_data["recurring_category"] = "ijara"
+    await query.message.reply_text(t("recurring_ijara_prompt", lang), reply_markup=cancel_keyboard(lang))
     return RECURRING_AMOUNT
 
 
@@ -611,8 +649,7 @@ async def recurring_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("invalid_number", lang))
         return RECURRING_AMOUNT
 
-    category = context.user_data.get("recurring_category", "ijara")
-    db.set_recurring_cost(owner_id(update), category, amount)
+    db.set_recurring_cost(owner_id(update), "ijara", amount)
     await update.message.reply_text(
         t("recurring_saved", lang, amount=fmt(amount)),
         reply_markup=main_menu_keyboard(lang),
@@ -852,6 +889,7 @@ def main():
             OMBOR_UNIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_unit)],
             OMBOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_price)],
             OMBOR_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_qty)],
+            OMBOR_TRANSPORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_transport)],
         },
         fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
     ))
