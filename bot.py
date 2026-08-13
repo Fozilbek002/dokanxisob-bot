@@ -1082,5 +1082,3 @@ if __name__ == "__main__":
         except Exception as e:
             logger.exception("Bot yiqildi, 5 soniyadan keyin qayta ishga tushadi: %s", e)
             time.sleep(5)
-
-
