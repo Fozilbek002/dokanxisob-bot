@@ -22,6 +22,8 @@ ombor, sotuv, chiqim, kassa va hisobotlar butunlay alohida saqlanadi.
 
 import os
 import re
+import time
+import uuid
 import logging
 from datetime import datetime, timedelta, date
 
@@ -74,6 +76,26 @@ logger = logging.getLogger(__name__)
     SALE_EDIT_QTY, SALE_EDIT_PRICE,
 ) = range(18)
 
+# ---- ASOSIY MENYU TUGMALARI (har qanday "raqam/matn kutish" bosqichida ----
+# ---- bu tugmalar bosilsa, joriy amal avtomatik bekor qilinishi kerak) ----
+MENU_BUTTON_TEXTS = [
+    "📦 Ombor", "🗑 Mahsulot o'chirish",
+    "➕ Mahsulot qo'shish", "💰 Sotish",
+    "📜 Sotuvlar tarixi", "💸 Chiqim",
+    "📜 Chiqimlar tarixi", "💵 Kassa",
+    "⚙️ Doimiy xarajat", "📊 Hisobot",
+    "📄 Ombor PDF", "📄 PDF",
+    "📊 Excel", "📈 Grafiklar",
+    "🤖 AI tahlili", "🌐 Til",
+]
+MENU_BUTTON_PATTERN = "^(" + "|".join(re.escape(x) for x in MENU_BUTTON_TEXTS) + ")$"
+
+# Har qanday "matn/raqam kutayotgan" bosqichda ishlatiladigan filtr: oddiy
+# matnni qabul qiladi, LEKIN asosiy menyu tugmalarini "matn" sifatida
+# yutib yubormaydi — shu orqali tugma bosilganda ConversationHandler
+# fallbacks ro'yxatiga (menu_interrupt) tushish imkoni qoladi.
+TEXT_INPUT = filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_BUTTON_PATTERN)
+
 
 def get_lang(context):
     return context.user_data.get("lang", "uz_latin")
@@ -89,6 +111,16 @@ def owner_id(update: Update):
 
 def fmt(n):
     return f"{n:,.0f}".replace(",", " ")
+
+
+def unique_path(prefix, ext, oid):
+    """Har bir foydalanuvchi/so'rov uchun alohida fayl nomi — bir vaqtda
+    bir nechta kishi PDF/Excel/Grafik so'rasa, fayllar bir-birini
+    ustidan yozib yubormasligi va aralashib ketmasligi uchun."""
+    os.makedirs("reports_output", exist_ok=True)
+    return os.path.join(
+        "reports_output", f"{prefix}_{oid}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}.{ext}"
+    )
 
 
 def parse_flexible_date(text):
@@ -164,9 +196,10 @@ async def ombor_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("ombor_list_empty", lang))
         return
     await update.message.reply_text(t("generating", lang))
-    path = generate_items_pdf(items)
+    path = generate_items_pdf(items, filepath=unique_path("ombor", "pdf", owner_id(update)))
     with open(path, "rb") as f:
         await update.message.reply_document(f, caption=t("ombor_pdf_ready", lang))
+    os.remove(path)
 
 
 # ---------------- MAHSULOT QO'SHISH ----------------
@@ -764,9 +797,13 @@ async def send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("no_report_yet", lang))
         return
     await update.message.reply_text(t("generating", lang))
-    path = generate_pdf(report, context.user_data.get("last_report_label", ""))
+    path = generate_pdf(
+        report, context.user_data.get("last_report_label", ""),
+        filepath=unique_path("hisobot", "pdf", owner_id(update)),
+    )
     with open(path, "rb") as f:
         await update.message.reply_document(f, caption=t("pdf_ready", lang))
+    os.remove(path)
 
 
 async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -776,9 +813,13 @@ async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("no_report_yet", lang))
         return
     await update.message.reply_text(t("generating", lang))
-    path = generate_excel(report, context.user_data.get("last_report_label", ""))
+    path = generate_excel(
+        report, context.user_data.get("last_report_label", ""),
+        filepath=unique_path("hisobot", "xlsx", owner_id(update)),
+    )
     with open(path, "rb") as f:
         await update.message.reply_document(f, caption=t("excel_ready", lang))
+    os.remove(path)
 
 
 async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -788,9 +829,13 @@ async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("no_report_yet", lang))
         return
     await update.message.reply_text(t("generating", lang))
-    path = generate_chart(report, context.user_data.get("last_report_label", ""))
+    path = generate_chart(
+        report, context.user_data.get("last_report_label", ""),
+        filepath=unique_path("grafik", "png", owner_id(update)),
+    )
     with open(path, "rb") as f:
         await update.message.reply_photo(f, caption=t("chart_ready", lang))
+    os.remove(path)
 
 
 async def send_ai_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -863,6 +908,30 @@ async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
 
+# Amal boshlamaydigan, faqat ko'rsatib beradigan asosiy menyu tugmalari —
+# bular ConversationHandler ichida "qolib ketilganda" ham bevosita ishga
+# tushirilishi mumkin (yangi conversation boshlamaydi).
+DIRECT_VIEW_HANDLERS = {}  # pastda, funksiyalar e'lon qilingandan keyin to'ldiriladi
+
+
+async def menu_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Foydalanuvchi biror amal (raqam/matn kiritish) jarayonida turib, asosiy
+    menyudan boshqa tugmani bossa ishga tushadi. Joriy jarayonni bekor qilib,
+    agar bosilgan tugma oddiy ko'rsatuvchi bo'lsa — uni shu zahoti bajaradi;
+    aks holda (yangi jarayon boshlaydigan tugma bo'lsa) foydalanuvchini
+    asosiy menyuga qaytarib, qayta bosishni so'raydi.
+    """
+    lang = get_lang(context)
+    text = update.message.text
+    handler = DIRECT_VIEW_HANDLERS.get(text)
+    if handler:
+        await handler(update, context)
+    else:
+        await update.message.reply_text(t("cancelled", lang), reply_markup=main_menu_keyboard(lang))
+    return ConversationHandler.END
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Xatolik:", exc_info=context.error)
 
@@ -871,6 +940,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     db.init_db()
+
+    DIRECT_VIEW_HANDLERS.update({
+        "📦 Ombor": ombor_list_show,
+        "🗑 Mahsulot o'chirish": ombor_delete_menu,
+        "📜 Sotuvlar tarixi": sales_list_show,
+        "📜 Chiqimlar tarixi": expenses_list_show,
+        "💵 Kassa": cash_show,
+        "📄 Ombor PDF": ombor_pdf,
+        "📄 PDF": send_pdf,
+        "📊 Excel": send_excel,
+        "📈 Grafiklar": send_chart,
+        "🤖 AI tahlili": send_ai_analysis,
+        "🌐 Til": lang_start,
+    })
+
+    menu_fallback = MessageHandler(filters.Regex(MENU_BUTTON_PATTERN), menu_interrupt)
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -885,13 +971,13 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ Mahsulot qo'shish$"), ombor_start)],
         states={
-            OMBOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_name)],
-            OMBOR_UNIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_unit)],
-            OMBOR_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_price)],
-            OMBOR_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_qty)],
-            OMBOR_TRANSPORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ombor_transport)],
+            OMBOR_NAME: [MessageHandler(TEXT_INPUT, ombor_name)],
+            OMBOR_UNIT: [MessageHandler(TEXT_INPUT, ombor_unit)],
+            OMBOR_PRICE: [MessageHandler(TEXT_INPUT, ombor_price)],
+            OMBOR_QTY: [MessageHandler(TEXT_INPUT, ombor_qty)],
+            OMBOR_TRANSPORT: [MessageHandler(TEXT_INPUT, ombor_transport)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Sotish (mahsulot -> son -> narx -> sana)
@@ -899,14 +985,14 @@ def main():
         entry_points=[MessageHandler(filters.Regex("^💰 Sotish$"), sale_start)],
         states={
             SALE_ITEM: [CallbackQueryHandler(sale_item_chosen, pattern="^item_")],
-            SALE_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_qty)],
-            SALE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_price)],
+            SALE_QTY: [MessageHandler(TEXT_INPUT, sale_qty)],
+            SALE_PRICE: [MessageHandler(TEXT_INPUT, sale_price)],
             SALE_DATE: [
                 CallbackQueryHandler(sale_date_callback, pattern="^date_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, sale_date_text),
+                MessageHandler(TEXT_INPUT, sale_date_text),
             ],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Sotuvlar tarixi, tahrirlash va o'chirish
@@ -914,20 +1000,20 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(sale_action_callback, pattern="^sale_(edit|del)_")],
         states={
-            SALE_EDIT_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_edit_qty)],
-            SALE_EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sale_edit_price)],
+            SALE_EDIT_QTY: [MessageHandler(TEXT_INPUT, sale_edit_qty)],
+            SALE_EDIT_PRICE: [MessageHandler(TEXT_INPUT, sale_edit_price)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Chiqim
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💸 Chiqim$"), expense_start)],
         states={
-            EXPENSE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_desc)],
-            EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_amount)],
+            EXPENSE_DESC: [MessageHandler(TEXT_INPUT, expense_desc)],
+            EXPENSE_AMOUNT: [MessageHandler(TEXT_INPUT, expense_amount)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Chiqimlar tarixi, tahrirlash va o'chirish
@@ -935,9 +1021,9 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(expense_action_callback, pattern="^exp_(edit|del)_")],
         states={
-            EXPENSE_EDIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, expense_edit_amount)],
+            EXPENSE_EDIT_AMOUNT: [MessageHandler(TEXT_INPUT, expense_edit_amount)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop$"))
 
@@ -946,10 +1032,10 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(cash_action_callback, pattern="^cash_")],
         states={
-            CASH_IN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_in_amount)],
-            CASH_OUT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cash_out_amount)],
+            CASH_IN_AMOUNT: [MessageHandler(TEXT_INPUT, cash_in_amount)],
+            CASH_OUT_AMOUNT: [MessageHandler(TEXT_INPUT, cash_out_amount)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Doimiy xarajat (ijara / yuk)
@@ -957,9 +1043,9 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(recurring_category_callback, pattern="^rec_")],
         states={
-            RECURRING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, recurring_amount)],
+            RECURRING_AMOUNT: [MessageHandler(TEXT_INPUT, recurring_amount)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # Hisobot
@@ -967,9 +1053,9 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(report_period_chosen, pattern="^period_")],
         states={
-            REPORT_CUSTOM_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_custom_date)],
+            REPORT_CUSTOM_DATE: [MessageHandler(TEXT_INPUT, report_custom_date)],
         },
-        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel)],
+        fallbacks=[MessageHandler(filters.Regex("^❌"), cancel), menu_fallback],
     ))
 
     # PDF / Excel / Grafik / AI
@@ -996,3 +1082,5 @@ if __name__ == "__main__":
         except Exception as e:
             logger.exception("Bot yiqildi, 5 soniyadan keyin qayta ishga tushadi: %s", e)
             time.sleep(5)
+
+
